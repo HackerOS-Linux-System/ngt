@@ -1,0 +1,4 @@
+// golang
+
+> cd source-code
+> go get ngt && go build
