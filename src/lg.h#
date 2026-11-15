@@ -1,0 +1,414 @@
+mod text
+
+pub struct Sty is
+    pub fg: string
+    pub bg: string
+    pub bold: bool
+    pub italic: bool
+    pub underline: bool
+    pub reverse: bool
+    pub width: int
+    pub height: int
+    pub pt: int
+    pub pr: int
+    pub pb: int
+    pub pl: int
+    pub border: string
+    pub bt: bool
+    pub br: bool
+    pub bb: bool
+    pub bl: bool
+    pub bfg: string
+    pub align: string
+    pub inline: bool
+end
+
+pub fn base() -> Sty is
+    return Sty {
+        fg: "", bg: "", bold: false, italic: false, underline: false, reverse: false,
+        width: 0, height: 0, pt: 0, pr: 0, pb: 0, pl: 0,
+        border: "", bt: false, br: false, bb: false, bl: false, bfg: "",
+        align: "left", inline: false
+    }
+end
+
+pub fn clone(s: Sty) -> Sty is
+    return Sty {
+        fg: s.fg, bg: s.bg, bold: s.bold, italic: s.italic, underline: s.underline, reverse: s.reverse,
+        width: s.width, height: s.height, pt: s.pt, pr: s.pr, pb: s.pb, pl: s.pl,
+        border: s.border, bt: s.bt, br: s.br, bb: s.bb, bl: s.bl, bfg: s.bfg,
+        align: s.align, inline: s.inline
+    }
+end
+
+pub fn fg(s: Sty, c: string) -> Sty is
+    let mut o: Sty = clone(s)
+    o.fg = c
+    return o
+end
+
+pub fn bg(s: Sty, c: string) -> Sty is
+    let mut o: Sty = clone(s)
+    o.bg = c
+    return o
+end
+
+pub fn bold(s: Sty) -> Sty is
+    let mut o: Sty = clone(s)
+    o.bold = true
+    return o
+end
+
+pub fn underline(s: Sty) -> Sty is
+    let mut o: Sty = clone(s)
+    o.underline = true
+    return o
+end
+
+pub fn width(s: Sty, w: int) -> Sty is
+    let mut o: Sty = clone(s)
+    o.width = w
+    return o
+end
+
+pub fn height(s: Sty, h: int) -> Sty is
+    let mut o: Sty = clone(s)
+    o.height = h
+    return o
+end
+
+;; Padding(top, right, bottom, left)
+pub fn pad(s: Sty, t: int, r: int, b: int, l: int) -> Sty is
+    let mut o: Sty = clone(s)
+    o.pt = t
+    o.pr = r
+    o.pb = b
+    o.pl = l
+    return o
+end
+
+;; Border on every side.
+pub fn boxed(s: Sty, kind: string, color: string) -> Sty is
+    let mut o: Sty = clone(s)
+    o.border = kind
+    o.bt = true
+    o.br = true
+    o.bb = true
+    o.bl = true
+    o.bfg = color
+    return o
+end
+
+;; Border on selected sides only.
+pub fn sides(s: Sty, kind: string, t: bool, r: bool, b: bool, l: bool, color: string) -> Sty is
+    let mut o: Sty = clone(s)
+    o.border = kind
+    o.bt = t
+    o.br = r
+    o.bb = b
+    o.bl = l
+    o.bfg = color
+    return o
+end
+
+pub fn align(s: Sty, a: string) -> Sty is
+    let mut o: Sty = clone(s)
+    o.align = a
+    return o
+end
+
+pub fn inl(s: Sty) -> Sty is
+    let mut o: Sty = clone(s)
+    o.inline = true
+    return o
+end
+
+;; ── colours ────────────────────────────────────────────────────────────────
+
+fn hexv(ch: string) -> int is
+    let digits: string = "0123456789abcdef"
+    let lc: string = string_lower(ch)
+    let mut i: int = 0
+    while i < 16 is
+        if digits[i..i + 1] == lc is return i end
+        i += 1
+    end
+    return 0
+end
+
+;; termenv: uint8(float64(v)/255 * 255) — truncates, so some channels lose 1.
+fn hex2(s: string, i: int) -> int is
+    let v: int = hexv(s[i..i + 1]) * 16 + hexv(s[i + 1..i + 2])
+    let factor: f64 = 1.0 / 255.0
+    let f: f64 = ((v as f64) * factor) * 255.0
+    return floor(f)
+end
+
+;; SGR parameters for a colour ("#rrggbb" or a 0-255 palette index).
+pub fn color_params(c: string, base: int) -> string is
+    if c == "" is return "" end
+    let sel: string = if base == 30 is "38" else is "48" end
+    if c.len() == 7 && c[0..1] == "#" is
+        return sel + ";2;" + to_string(hex2(c, 1)) + ";" + to_string(hex2(c, 3)) + ";" + to_string(hex2(c, 5))
+    end
+    let n: int = __builtin_conv_str_to_int(c)
+    if n >= 0 && n < 8 is return to_string(base + n) end
+    if n >= 8 && n < 16 is return to_string(base + 60 + n - 8) end
+    return sel + ";5;" + c
+end
+
+;; termenv Style.Styled: prefix + text + reset (no-op when there is nothing to apply).
+pub fn styled(params: [string], t: string) -> string is
+    if params.len() == 0 is return t end
+    return "\x1b[" + __builtin_str_join(params, ";") + "m" + t + "\x1b[0m"
+end
+
+fn core_params(s: Sty) -> [string] is
+    let mut p: [string] = []
+    if s.bold is p.push("1") end
+    if s.italic is p.push("3") end
+    if s.underline is p.push("4") end
+    if s.reverse is p.push("7") end
+    if s.fg != "" is p.push(color_params(s.fg, 30)) end
+    if s.bg != "" is p.push(color_params(s.bg, 40)) end
+    return p
+end
+
+fn ws_params(s: Sty) -> [string] is
+    let mut p: [string] = []
+    if s.bg != "" is p.push(color_params(s.bg, 40)) end
+    return p
+end
+
+;; ── alignment ──────────────────────────────────────────────────────────────
+
+fn align_h(str: string, pos: string, w: int, ws: [string]) -> string is
+    let lines: [string] = str_split(str, "\n")
+    let mut widest: int = 0
+    for l in lines is
+        let lw: int = text::width(l)
+        if lw > widest is widest = lw end
+    end
+    let mut out: [string] = []
+    for l in lines is
+        let lw: int = text::width(l)
+        let mut short: int = widest - lw
+        short += text::maxi(0, w - (short + lw))
+        let mut line: string = l
+        if short > 0 is
+            if pos == "right" is
+                line = styled(ws, text::spaces(short)) + line
+            elsif pos == "center" is
+                let left: int = short / 2
+                let right: int = left + short % 2
+                line = styled(ws, text::spaces(left)) + line + styled(ws, text::spaces(right))
+            else is
+                line = line + styled(ws, text::spaces(short))
+            end
+        end
+        out.push(line)
+    end
+    return __builtin_str_join(out, "\n")
+end
+
+fn align_v(str: string, h: int) -> string is
+    let n: int = text::block_h(str)
+    if h <= n is return str end
+    return str + text::rep("\n", h - n)
+end
+
+fn border_chars(kind: string) -> (string, string, string, string, string, string) is
+    ;; (horizontal, vertical, top-left, top-right, bottom-left, bottom-right)
+    if kind == "thick" is return ("━", "┃", "┏", "┓", "┗", "┛") end
+    if kind == "rounded" is return ("─", "│", "╭", "╮", "╰", "╯") end
+    return ("─", "│", "┌", "┐", "└", "┘")
+end
+
+fn edge(left: string, mid: string, right: string, w: int) -> string is
+    if w < 1 is return "" end
+    let lw: int = text::width(left)
+    let rw: int = text::width(right)
+    let mut out: string = left
+    let mut j: int = 0
+    while lw + rw + j < w is
+        out = out + mid
+        j += 1
+    end
+    return out + right
+end
+
+fn apply_border(s: Sty, str: string) -> string is
+    if s.border == "" is return str end
+    let (hz, vt, tl, tr, bl, br) = border_chars(s.border)
+    let bp: [string] = if s.bfg == "" is [] else is [color_params(s.bfg, 30)] end
+    let lines: [string] = str_split(str, "\n")
+    let mut w: int = 0
+    for l in lines is
+        let lw: int = text::width(l)
+        if lw > w is w = lw end
+    end
+    if s.bl is w += text::width(vt) end
+    if s.br is w += text::width(vt) end
+    let mut out: [string] = []
+    if s.bt is
+        let l0: string = if s.bl is tl else is "" end
+        let r0: string = if s.br is tr else is "" end
+        out.push(styled(bp, edge(l0, hz, r0, w)))
+    end
+    for l in lines is
+        let mut line: string = ""
+        if s.bl is line = styled(bp, vt) end
+        line = line + l
+        if s.br is line = line + styled(bp, vt) end
+        out.push(line)
+    end
+    if s.bb is
+        let l1: string = if s.bl is bl else is "" end
+        let r1: string = if s.br is br else is "" end
+        out.push(styled(bp, edge(l1, hz, r1, w)))
+    end
+    return __builtin_str_join(out, "\n")
+end
+
+;; lipgloss Style.Render
+pub fn render(s: Sty, str0: string) -> string is
+    let mut str: string = str0
+    if s.inline is str = string_replace(str, "\n", "") end
+    if !s.inline && s.width > 0 is
+        let wrap_at: int = s.width - s.pl - s.pr
+        str = text::wordwrap(str, wrap_at)
+        str = text::hardwrap(str, wrap_at)
+    end
+    let cp: [string] = core_params(s)
+    let ws: [string] = ws_params(s)
+    ;; core text, line by line
+    let lines: [string] = str_split(str, "\n")
+    let mut styled_lines: [string] = []
+    for l in lines is styled_lines.push(styled(cp, l)) end
+    str = __builtin_str_join(styled_lines, "\n")
+    if !s.inline is
+        if s.pl > 0 || s.pr > 0 is
+            let ls: [string] = str_split(str, "\n")
+            let mut padded: [string] = []
+            for l in ls is
+                let mut x: string = l
+                if s.pl > 0 is x = styled(ws, text::spaces(s.pl)) + x end
+                if s.pr > 0 is x = x + styled(ws, text::spaces(s.pr)) end
+                padded.push(x)
+            end
+            str = __builtin_str_join(padded, "\n")
+        end
+        if s.pt > 0 is str = text::rep("\n", s.pt) + str end
+        if s.pb > 0 is str = str + text::rep("\n", s.pb) end
+    end
+    if s.height > 0 is str = align_v(str, s.height) end
+    let num_lines: int = text::block_h(str) - 1
+    if !(num_lines == 0 && s.width == 0) is
+        str = align_h(str, s.align, s.width, ws)
+    end
+    if !s.inline is str = apply_border(s, str) end
+    return str
+end
+
+;; ── joins & placement ──────────────────────────────────────────────────────
+
+pub fn join_vertical(blocks: [string]) -> string is
+    let mut all: [string] = []
+    for b in blocks is
+        for l in str_split(b, "\n") is all.push(l) end
+    end
+    let mut maxw: int = 0
+    for l in all is
+        let w: int = text::width(l)
+        if w > maxw is maxw = w end
+    end
+    let mut out: [string] = []
+    for l in all is out.push(l + text::spaces(maxw - text::width(l))) end
+    return __builtin_str_join(out, "\n")
+end
+
+pub fn join_horizontal(blocks: [string]) -> string is
+    let mut cols: [[string]] = []
+    let mut widths: [int] = []
+    let mut maxh: int = 0
+    for b in blocks is
+        let ls: [string] = str_split(b, "\n")
+        let mut mw: int = 0
+        for l in ls is
+            let w: int = text::width(l)
+            if w > mw is mw = w end
+        end
+        cols.push(ls)
+        widths.push(mw)
+        if ls.len() > maxh is maxh = ls.len() end
+    end
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < maxh is
+        let mut line: string = ""
+        let mut j: int = 0
+        while j < cols.len() is
+            let col: [string] = cols[j]
+            let mut cell: string = ""
+            if i < col.len() is cell = col[i] end
+            line = line + cell + text::spaces(widths[j] - text::width(cell))
+            j += 1
+        end
+        out.push(line)
+        i += 1
+    end
+    return __builtin_str_join(out, "\n")
+end
+
+fn go_round(x: f64) -> int is
+    return floor(x + 0.5)
+end
+
+;; lipgloss.Place(width, height, Center, Center, str)
+pub fn place_center(w: int, h: int, str: string) -> string is
+    let lines: [string] = str_split(str, "\n")
+    let mut cw: int = 0
+    for l in lines is
+        let lw: int = text::width(l)
+        if lw > cw is cw = lw end
+    end
+    let gap: int = w - cw
+    let mut hs: string = str
+    if gap > 0 is
+        let mut out: [string] = []
+        for l in lines is
+            let short: int = text::maxi(0, cw - text::width(l))
+            let total: int = gap + short
+            let split: int = go_round((total as f64) * 0.5)
+            let left: int = total - split
+            let right: int = total - left
+            out.push(text::spaces(left) + l + text::spaces(right))
+        end
+        hs = __builtin_str_join(out, "\n")
+    end
+    let vgap: int = h - text::block_h(hs)
+    if vgap <= 0 is return hs end
+    let width2: int = text::block_w(hs)
+    let empty: string = text::spaces(width2)
+    let split2: int = go_round((vgap as f64) * 0.5)
+    let top: int = vgap - split2
+    let bottom: int = vgap - top
+    let mut res: string = ""
+    let mut i: int = 0
+    while i < top is
+        res = res + empty + "\n"
+        i += 1
+    end
+    res = res + hs
+    i = 0
+    while i < bottom is
+        res = res + "\n" + empty
+        i += 1
+    end
+    return res
+end
+
+;; Plain-text foreground helper: lg::fgc("text", "#58A6FF")
+pub fn fgc(t: string, c: string) -> string is
+    return render(fg(base(), c), t)
+end
