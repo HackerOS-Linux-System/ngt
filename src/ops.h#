@@ -1,0 +1,434 @@
+use "bit -> tui" from "tui"
+
+mod text
+mod lg
+mod flist
+mod vfs
+mod tinput
+mod editor
+mod theme
+mod model
+mod panel
+mod screen
+
+fn err_status(m: &mut model::Model, s: string) is
+    m.status = lg::render(theme::error_style(), s)
+end
+
+;; CommandResult handler (update.go)
+pub fn command_result(m: &mut model::Model, output: string, err: string) is
+    if err != "" is
+        m.status = lg::render(theme::error_style(), "✗ " + err + " " + output)
+    else is
+        m.status = lg::render(theme::success_style(), "✓ " + output)
+    end
+    panel::refresh(m, m.active)
+    panel::refresh(m, 1 - m.active)
+    m.mode = model::MODE_EXPLORER
+end
+
+fn fields(s: string) -> [string] is
+    return __builtin_str_split_whitespace(s)
+end
+
+fn rest_args(a: [string]) -> [string] is
+    let mut o: [string] = []
+    let mut i: int = 1
+    while i < a.len() is
+        o.push(a[i])
+        i += 1
+    end
+    return o
+end
+
+pub fn run_system_command(m: &mut model::Model, name: string, args: [string]) is
+    let dir: string = m.panels[m.active].dir
+    let (rc0, o0, e0) = vfs::sh("command -v " + vfs::sq(name))
+    if rc0 != 0 is
+        command_result(m, "", "exec: \"" + name + "\": executable file not found in $PATH")
+        return
+    end
+    if !fs_exists(dir) is
+        command_result(m, "", "chdir " + dir + ": no such file or directory")
+        return
+    end
+    let mut cmd: string = "cd " + vfs::sq(dir) + " && exec " + vfs::sq(name)
+    for a in args is cmd = cmd + " " + vfs::sq(a) end
+    let (rc, out, err) = vfs::sh(cmd + " 2>&1 </dev/null")
+    if rc != 0 is
+        command_result(m, out, "exit status " + to_string(rc))
+    else is
+        command_result(m, out, "")
+    end
+end
+
+;; ── sources of an operation ────────────────────────────────────────────────
+
+fn current_title(m: model::Model) -> (bool, string) is
+    let (ok, it) = flist::selected(m.panels[m.active].list)
+    return (ok, it.title)
+end
+
+fn collect_sources(m: model::Model, args: [string]) -> ([string], string) is
+    let p: model::Panel = m.panels[m.active]
+    let mut dst: string = m.panels[1 - m.active].dir
+    let mut sources: [string] = []
+    for f in p.selected is sources.push(f) end
+    if sources.len() == 0 && args.len() > 2 is
+        sources = [vfs::join(p.dir, args[1])]
+        dst = args[2]
+    end
+    if sources.len() == 0 is
+        let (ok, title) = current_title(m)
+        if ok is sources = [vfs::join(p.dir, title)] end
+    end
+    return (sources, dst)
+end
+
+fn tmp_name() -> string is
+    return env_temp_dir() + "/ngt-xfer-" + to_string(os_pid()) + "-" + to_string(time_now_ms())
+end
+
+;; copyFileVFS: "" or error
+fn copy_file(src_v: vfs::Vfs, dst_v: vfs::Vfs, src: string, dst: string) -> string is
+    let (ex, isd, sz) = vfs::stat(src_v, src)
+    if !ex is return "open " + src + ": no such file or directory" end
+    if isd is return "directory copy not implemented" end
+    let tmp: string = tmp_name()
+    let e1: string = vfs::fetch(src_v, src, tmp)
+    if e1 != "" is return e1 end
+    let e2: string = vfs::put(dst_v, tmp, dst)
+    let _r: int = fs_remove(tmp)
+    return e2
+end
+
+fn step(m: &mut model::Model, pct: f64) is
+    m.progress = pct
+    screen::present(m)
+end
+
+pub fn copy_with_progress(m: &mut model::Model, args: [string]) is
+    m.mode = model::MODE_PROGRESS
+    m.progress = 0.0
+    screen::present(m)
+    let (sources, dst) = collect_sources(m, args)
+    let total: int = sources.len()
+    let src_v: vfs::Vfs = m.panels[m.active].vfs
+    let dst_v: vfs::Vfs = m.panels[1 - m.active].vfs
+    let mut first_err: string = ""
+    let mut i: int = 0
+    while i < total is
+        let src: string = sources[i]
+        let e: string = copy_file(src_v, dst_v, src, vfs::join(dst, vfs::base(src)))
+        if e != "" && first_err == "" is first_err = e end
+        step(m, ((i + 1) as f64) / (total as f64))
+        i += 1
+    end
+    m.panels[m.active].selected = []
+    step(m, 1.0)
+    if first_err != "" is
+        command_result(m, "", first_err)
+    else is
+        command_result(m, "Copied " + to_string(total) + " file(s)", "")
+    end
+end
+
+pub fn move_with_progress(m: &mut model::Model, args: [string]) is
+    m.mode = model::MODE_PROGRESS
+    m.progress = 0.0
+    screen::present(m)
+    let (sources, dst) = collect_sources(m, args)
+    let total: int = sources.len()
+    let v: vfs::Vfs = m.panels[m.active].vfs
+    let mut i: int = 0
+    while i < total is
+        let src: string = sources[i]
+        let new_path: string = vfs::join(dst, vfs::base(src))
+        let e: string = vfs::rename(v, src, new_path)
+        if e != "" is
+            command_result(m, "", "move " + vfs::base(src) + ": " + e)
+            return
+        end
+        step(m, ((i + 1) as f64) / (total as f64))
+        i += 1
+    end
+    m.panels[m.active].selected = []
+    step(m, 1.0)
+    command_result(m, "Moved " + to_string(total) + " file(s)", "")
+end
+
+pub fn delete_with_progress(m: &mut model::Model) is
+    let mut targets: [string] = []
+    for f in m.panels[m.active].selected is targets.push(f) end
+    if targets.len() == 0 is
+        let (ok, title) = current_title(m)
+        if ok is targets = [vfs::join(m.panels[m.active].dir, title)] end
+    end
+    let v: vfs::Vfs = m.panels[m.active].vfs
+    for t in targets is
+        let _e: string = vfs::remove(v, t)
+    end
+    m.panels[m.active].selected = []
+    command_result(m, "Deleted " + to_string(targets.len()) + " file(s)", "")
+end
+
+pub fn copy_to_other(m: &mut model::Model) is
+    copy_with_progress(m, ["cp", ".", m.panels[1 - m.active].dir])
+end
+
+pub fn move_to_other(m: &mut model::Model) is
+    move_with_progress(m, ["mv", ".", m.panels[1 - m.active].dir])
+end
+
+pub fn prompt_confirm_delete(m: &mut model::Model) is
+    let count: int = model::sel_count(m.panels[m.active])
+    if count == 0 is
+        let (ok, title) = current_title(m)
+        if !ok is
+            err_status(m, "No file selected")
+            return
+        end
+        m.confirm_msg = "Delete '" + title + "'? (y/n)"
+    else is
+        m.confirm_msg = "Delete " + to_string(count) + " selected files? (y/n)"
+    end
+    m.confirm_action = "delete"
+    m.mode = model::MODE_CONFIRM
+end
+
+pub fn duplicate_selected(m: &mut model::Model) is
+    let (ok, title) = current_title(m)
+    if !ok is
+        err_status(m, "No file selected")
+        return
+    end
+    let dir: string = m.panels[m.active].dir
+    let src: string = vfs::join(dir, title)
+    let ex: string = vfs::ext(title)
+    let base: string = title[0..title.len() - ex.len()]
+    let dst: string = vfs::join(dir, base + "_copy" + ex)
+    m.mode = model::MODE_PROGRESS
+    m.progress = 0.0
+    screen::present(m)
+    let v: vfs::Vfs = m.panels[m.active].vfs
+    let e: string = copy_file(v, v, src, dst)
+    step(m, 1.0)
+    if e != "" is
+        command_result(m, "", e)
+    else is
+        command_result(m, "Duplicated: " + vfs::base(dst), "")
+    end
+end
+
+pub fn cycle_sort(m: &mut model::Model) is
+    m.panels[m.active].sort = (m.panels[m.active].sort + 1) % 4
+    panel::refresh(m, m.active)
+    m.status = lg::render(theme::warn_style(), "Sort: " + model::sort_name(m.panels[m.active].sort))
+end
+
+;; ── remote / container / archive ───────────────────────────────────────────
+
+pub fn connect_podman(m: &mut model::Model, id: string) is
+    let (v, err) = vfs::connect_podman(id)
+    if err != "" is
+        err_status(m, "podman: " + err)
+        return
+    end
+    m.panels[m.active].vfs = v
+    m.panels[m.active].dir = v.cwd
+    panel::refresh(m, m.active)
+    m.status = lg::render(theme::success_style(), "Connected to container " + v.cname)
+end
+
+pub fn list_podman(m: &mut model::Model) is
+    let (rc0, o0, e0) = vfs::sh("command -v podman")
+    if rc0 != 0 is
+        err_status(m, "podman ps failed: exec: \"podman\": executable file not found in $PATH")
+        return
+    end
+    let (cs, err) = vfs::list_podman()
+    if err != "" is
+        err_status(m, "podman ps failed: " + err)
+        return
+    end
+    m.podman = cs
+    m.mode = model::MODE_PODMAN
+end
+
+pub fn connect_sftp(m: &mut model::Model, url0: string) is
+    let mut url: string = url0
+    if !string_starts_with(url, "sftp://") is url = "sftp://" + url end
+    let body: string = url[7..url.len()]
+    let at: int = __builtin_str_index_of(body, "@")
+    if at < 0 is
+        err_status(m, "invalid sftp url, use sftp://user:pass@host")
+        return
+    end
+    let userpass: string = body[0..at]
+    let host: string = body[at + 1..body.len()]
+    let colon: int = __builtin_str_index_of(userpass, ":")
+    let mut user: string = userpass
+    let mut pass: string = ""
+    if colon >= 0 is
+        user = userpass[0..colon]
+        pass = userpass[colon + 1..userpass.len()]
+    end
+    let (v, err) = vfs::connect_sftp(host, user, pass)
+    if err != "" is
+        err_status(m, err)
+        return
+    end
+    m.panels[m.active].vfs = v
+    m.panels[m.active].dir = v.cwd
+    panel::refresh(m, m.active)
+end
+
+pub fn is_archive(file: string) -> bool is
+    let e: string = vfs::ext(file)
+    return e == ".zip" || e == ".tar" || string_ends_with(file, ".tar.gz")
+end
+
+pub fn mount_archive(m: &mut model::Model, file: string) is
+    let full: string = vfs::join(m.panels[m.active].dir, file)
+    let e: string = vfs::ext(file)
+    if e != ".zip" && e != ".tar" && !string_ends_with(file, ".tar.gz") is
+        err_status(m, "Unsupported archive format")
+        return
+    end
+    let (v, err) = vfs::open_archive(full)
+    if err != "" is
+        err_status(m, err)
+        return
+    end
+    m.panels[m.active].vfs = v
+    m.panels[m.active].dir = full
+    panel::refresh(m, m.active)
+end
+
+;; ── editor ─────────────────────────────────────────────────────────────────
+
+pub fn open_editor(m: &mut model::Model, file: string) is
+    let v: vfs::Vfs = m.panels[m.active].vfs
+    let (ex, isd, sz) = vfs::stat(v, file)
+    if !ex is
+        err_status(m, "hedit: stat " + file + ": no such file or directory")
+        return
+    end
+    if sz > theme::MAX_EDIT_SIZE is
+        err_status(m, "File too large to edit (>10MB)")
+        return
+    end
+    if isd is
+        err_status(m, "hedit: read " + file + ": is a directory")
+        return
+    end
+    let (content, err) = vfs::read_text(v, file)
+    if err != "" is
+        err_status(m, "hedit: " + err)
+        return
+    end
+    editor::set_value(&mut m.ed, content)
+    m.editor_file = file
+    m.mode = model::MODE_EDITOR
+end
+
+pub fn help(m: &mut model::Model) is
+    let lines: [string] = [
+        "ngt keybindings:",
+        "  Tab       – switch panel",
+        "  Enter/l   – open dir/file/archive",
+        "  Backspace – cd ..",
+        "  Space     – select/deselect",
+        "  F5        – copy to other panel",
+        "  F6        – move to other panel",
+        "  F8        – delete (with confirmation)",
+        "  Ctrl+P    – fuzzy search",
+        "  Ctrl+R    – bulk rename (regex)",
+        "  Ctrl+S    – cycle sort mode",
+        "  Ctrl+D    – podman container browser",
+        "  Ctrl+U    – duplicate file",
+        "  Ctrl+O    – open sub-shell",
+        "  Ctrl+Z    – suspend",
+        "  r         – refresh panel",
+        "  q/Ctrl+C  – quit",
+        "Commands: cd, cp, mv, rm, mkdir, touch, hedit, sftp, podman, podmanls"
+    ]
+    m.status = lg::render(theme::success_style(), __builtin_str_join(lines, "\n"))
+end
+
+;; ── the dispatcher ─────────────────────────────────────────────────────────
+
+pub fn execute_command(m: &mut model::Model, cmd_str: string) is
+    let args: [string] = fields(cmd_str)
+    if args.len() == 0 is
+        err_status(m, "Empty command")
+        return
+    end
+    let a0: string = args[0]
+    let cur_dir: string = m.panels[m.active].dir
+    if a0 == "cd" is
+        if args.len() < 2 is
+            err_status(m, "cd requires a directory")
+            return
+        end
+        let mut new_dir: string = args[1]
+        if !vfs::is_abs(new_dir) is new_dir = vfs::join(cur_dir, new_dir) end
+        let e: string = vfs::chdir(&mut m.panels[m.active].vfs, new_dir)
+        if e != "" is
+            err_status(m, "cd: " + e)
+            return
+        end
+        m.panels[m.active].dir = m.panels[m.active].vfs.cwd
+        panel::refresh(m, m.active)
+    elsif a0 == "mv" is
+        move_with_progress(m, args)
+    elsif a0 == "rm" is
+        prompt_confirm_delete(m)
+    elsif a0 == "cp" is
+        copy_with_progress(m, args)
+    elsif a0 == "touch" is
+        if args.len() < 2 is
+            err_status(m, "touch requires filename")
+            return
+        end
+        let e: string = vfs::create_empty(m.panels[m.active].vfs, vfs::join(cur_dir, args[1]))
+        if e != "" is
+            err_status(m, "touch: " + e)
+            return
+        end
+        panel::refresh(m, m.active)
+    elsif a0 == "mkdir" is
+        if args.len() < 2 is
+            err_status(m, "mkdir requires name")
+            return
+        end
+        let e: string = vfs::mkdir_all(m.panels[m.active].vfs, vfs::join(cur_dir, args[1]))
+        if e != "" is
+            err_status(m, "mkdir: " + e)
+            return
+        end
+        panel::refresh(m, m.active)
+    elsif a0 == "hedit" is
+        if args.len() < 2 is
+            err_status(m, "hedit requires filename")
+            return
+        end
+        open_editor(m, vfs::join(cur_dir, args[1]))
+    elsif a0 == "sftp" is
+        if args.len() < 2 is
+            err_status(m, "sftp requires url sftp://user:pass@host")
+            return
+        end
+        connect_sftp(m, args[1])
+    elsif a0 == "podman" is
+        if args.len() < 2 is
+            err_status(m, "podman requires container id/name")
+            return
+        end
+        connect_podman(m, args[1])
+    elsif a0 == "podmanls" is
+        list_podman(m)
+    else is
+        run_system_command(m, a0, rest_args(args))
+    end
+end
