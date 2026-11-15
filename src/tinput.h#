@@ -1,0 +1,278 @@
+mod text
+mod lg
+
+pub struct TI is
+    pub value: [string]
+    pub pos: int
+    pub focus: bool
+    pub prompt: string
+    pub prompt_fg: string
+    pub placeholder: string
+    pub width: int
+    pub limit: int
+    pub offset: int
+    pub blink_hidden: bool
+end
+
+pub fn make(prompt: string, placeholder: string) -> TI is
+    return TI { value: [], pos: 0, focus: false, prompt: prompt, prompt_fg: "", placeholder: placeholder, width: 0, limit: 0, offset: 0, blink_hidden: false }
+end
+
+pub fn val(t: TI) -> string is
+    return __builtin_str_join(t.value, "")
+end
+
+pub fn set_value(t: &mut TI, s: string) is
+    t.value = text::runes(s)
+    if t.limit > 0 && t.value.len() > t.limit is
+        let mut cut: [string] = []
+        let mut i: int = 0
+        while i < t.limit is
+            cut.push(t.value[i])
+            i += 1
+        end
+        t.value = cut
+    end
+    t.pos = t.value.len()
+end
+
+pub fn reset(t: &mut TI) is
+    t.value = []
+    t.pos = 0
+    t.offset = 0
+end
+
+pub fn do_focus(t: &mut TI) is
+    t.focus = true
+    t.blink_hidden = false
+end
+
+pub fn do_blur(t: &mut TI) is
+    t.focus = false
+end
+
+pub fn cursor_end(t: &mut TI) is
+    t.pos = t.value.len()
+end
+
+fn is_sp(r: string) -> bool is
+    return r == " " || r == "\t"
+end
+
+fn slice(v: [string], a: int, b: int) -> [string] is
+    let mut o: [string] = []
+    let mut i: int = a
+    while i < b is
+        o.push(v[i])
+        i += 1
+    end
+    return o
+end
+
+fn insert_rune(t: &mut TI, r: string) is
+    if t.limit > 0 && t.value.len() >= t.limit is return end
+    let head: [string] = slice(t.value, 0, t.pos)
+    let tail: [string] = slice(t.value, t.pos, t.value.len())
+    let mut nv: [string] = head
+    nv.push(r)
+    for x in tail is nv.push(x) end
+    t.value = nv
+    t.pos += 1
+end
+
+fn delete_range(t: &mut TI, a: int, b: int) is
+    let head: [string] = slice(t.value, 0, a)
+    let tail: [string] = slice(t.value, b, t.value.len())
+    let mut nv: [string] = head
+    for x in tail is nv.push(x) end
+    t.value = nv
+end
+
+fn word_back(t: &mut TI) is
+    if t.pos == 0 || t.value.len() == 0 is return end
+    let mut p: int = t.pos - 1
+    while p > 0 && is_sp(t.value[p]) is p -= 1 end
+    while p > 0 is
+        if !is_sp(t.value[p - 1]) is p -= 1 else is break end
+    end
+    t.pos = p
+end
+
+fn word_fwd(t: &mut TI) is
+    if t.pos >= t.value.len() || t.value.len() == 0 is return end
+    let mut p: int = t.pos
+    while p < t.value.len() && is_sp(t.value[p]) is p += 1 end
+    while p < t.value.len() is
+        if !is_sp(t.value[p]) is p += 1 else is break end
+    end
+    t.pos = p
+end
+
+fn del_word_back(t: &mut TI) is
+    if t.pos == 0 || t.value.len() == 0 is return end
+    let i: int = t.pos
+    let mut p: int = t.pos - 1
+    while p > 0 && is_sp(t.value[p]) is p -= 1 end
+    while p > 0 is
+        if !is_sp(t.value[p - 1]) is p -= 1 else is break end
+    end
+    delete_range(t, p, i)
+    t.pos = p
+end
+
+fn del_word_fwd(t: &mut TI) is
+    if t.pos >= t.value.len() || t.value.len() == 0 is return end
+    let mut p: int = t.pos
+    while p < t.value.len() && is_sp(t.value[p]) is p += 1 end
+    while p < t.value.len() is
+        if !is_sp(t.value[p]) is p += 1 else is break end
+    end
+    delete_range(t, t.pos, p)
+end
+
+;; Apply one key. Only has an effect while focused (like bubbles).
+pub fn update(t: &mut TI, key: string) is
+    if !t.focus is return end
+    t.blink_hidden = false
+    if key == "left" || key == "ctrl+b" is
+        if t.pos > 0 is t.pos -= 1 end
+    elsif key == "right" || key == "ctrl+f" is
+        if t.pos < t.value.len() is t.pos += 1 end
+    elsif key == "alt+left" || key == "ctrl+left" || key == "alt+b" is
+        word_back(t)
+    elsif key == "alt+right" || key == "ctrl+right" || key == "alt+f" is
+        word_fwd(t)
+    elsif key == "backspace" || key == "ctrl+h" is
+        if t.pos > 0 && t.value.len() > 0 is
+            delete_range(t, t.pos - 1, t.pos)
+            t.pos -= 1
+        end
+    elsif key == "delete" || key == "ctrl+d" is
+        if t.pos < t.value.len() is delete_range(t, t.pos, t.pos + 1) end
+    elsif key == "alt+backspace" || key == "ctrl+w" is
+        del_word_back(t)
+    elsif key == "alt+delete" || key == "alt+d" is
+        del_word_fwd(t)
+    elsif key == "ctrl+k" is
+        t.value = slice(t.value, 0, t.pos)
+    elsif key == "ctrl+u" is
+        t.value = slice(t.value, t.pos, t.value.len())
+        t.pos = 0
+    elsif key == "home" || key == "ctrl+a" is
+        t.pos = 0
+    elsif key == "end" || key == "ctrl+e" is
+        t.pos = t.value.len()
+    elsif key == "space" is
+        insert_rune(t, " ")
+    elsif text::rune_count(key) == 1 && text::byte_at(key, 0) >= 32 is
+        insert_rune(t, key)
+    end
+end
+
+fn cursor_view(ch: string, hidden: bool, placeholder_style: bool) -> string is
+    if hidden is
+        if placeholder_style is return lg::render(lg::inl(lg::fg(lg::base(), "240")), ch) end
+        return ch
+    end
+    let mut s: lg::Sty = lg::inl(lg::base())
+    s.reverse = true
+    return lg::render(s, ch)
+end
+
+fn prompt_view(t: TI) -> string is
+    if t.prompt_fg == "" is return t.prompt end
+    return lg::render(lg::fg(lg::base(), t.prompt_fg), t.prompt)
+end
+
+fn placeholder_view(t: TI) -> string is
+    let p: [string] = text::runes(t.placeholder)
+    let ph: lg::Sty = lg::inl(lg::fg(lg::base(), "240"))
+    let hidden: bool = t.blink_hidden || !t.focus
+    let mut v: string = cursor_view(p[0], hidden, true)
+    if t.width < 1 && p.len() <= 1 is return prompt_view(t) + v end
+    if t.width > 0 is
+        let min_w: int = text::width(t.placeholder)
+        let mut avail: int = t.width - min_w + 1
+        let mut mw: int = min_w
+        if avail < 0 is
+            mw += avail
+            avail = 0
+        end
+        let mut rest: string = ""
+        let mut i: int = 1
+        while i < mw && i < p.len() is
+            rest = rest + p[i]
+            i += 1
+        end
+        v = v + lg::render(ph, rest)
+        v = v + lg::render(ph, text::spaces(avail))
+    else is
+        let mut rest2: string = ""
+        let mut k: int = 1
+        while k < p.len() is
+            rest2 = rest2 + p[k]
+            k += 1
+        end
+        v = v + lg::render(ph, rest2)
+    end
+    return prompt_view(t) + v
+end
+
+pub fn view(t: TI) -> string is
+    if t.value.len() == 0 && t.placeholder != "" is return placeholder_view(t) end
+    let hidden: bool = t.blink_hidden || !t.focus
+    let n: int = t.value.len()
+    let mut off: int = 0
+    let mut right: int = n
+    if t.width > 0 && n > t.width is
+        off = t.offset
+        if t.pos < off is off = t.pos end
+        if t.pos >= off + t.width is off = t.pos - t.width + 1 end
+        if off < 0 is off = 0 end
+        right = text::mini(n, off + t.width)
+    end
+    let plain: lg::Sty = lg::inl(lg::base())
+    let mut before: string = ""
+    let mut i: int = off
+    let pos: int = text::maxi(0, t.pos - off)
+    while i < right && i - off < pos is
+        before = before + t.value[i]
+        i += 1
+    end
+    let mut v: string = lg::render(plain, before)
+    let mut shown: string = ""
+    let mut k: int = off
+    while k < right is
+        shown = shown + t.value[k]
+        k += 1
+    end
+    if off + pos < right is
+        v = v + cursor_view(t.value[off + pos], hidden, false)
+        let mut after: string = ""
+        let mut j: int = off + pos + 1
+        while j < right is
+            after = after + t.value[j]
+            j += 1
+        end
+        v = v + lg::render(plain, after)
+    else is
+        v = v + cursor_view(" ", hidden, false)
+    end
+    let vw: int = text::width(shown)
+    if t.width > 0 && vw <= t.width is
+        let mut padding: int = text::maxi(0, t.width - vw)
+        if vw + padding <= t.width && off + pos < right is padding += 1 end
+        v = v + lg::render(plain, text::spaces(padding))
+    end
+    return prompt_view(t) + v
+end
+
+;; Bracketed paste / programmatic insert (newlines and tabs become spaces).
+pub fn insert_text(t: &mut TI, s: string) is
+    if !t.focus is return end
+    for r in text::runes(s) is
+        let mut ch: string = r
+        if ch == "\n" || ch == "\r" || ch == "\t" is ch = " " end
+        if text::byte_at(ch, 0) >= 32 is insert_rune(t, ch) end
+    end
+end
