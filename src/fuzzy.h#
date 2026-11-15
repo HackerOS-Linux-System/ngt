@@ -1,0 +1,135 @@
+mod text
+
+pub struct Match is
+    pub index: int
+    pub score: int
+    pub matched: [int]
+end
+
+fn is_sep(cp: int) -> bool is
+    ;; "/-_ .\\"
+    return cp == 47 || cp == 45 || cp == 95 || cp == 32 || cp == 46 || cp == 92
+end
+
+fn lower_cp(cp: int) -> int is
+    if cp >= 65 && cp <= 90 is return cp + 32 end
+    return cp
+end
+
+fn eq_fold(a: int, b: int) -> bool is
+    return lower_cp(a) == lower_cp(b)
+end
+
+fn adjacent_bonus(i: int, last_match: int, cur: int) -> int is
+    if last_match == i is return cur * 2 + 5 end
+    return 0
+end
+
+;; All items matching `pattern`, best first (same ordering as sort.Stable with >=).
+pub fn find(pattern: string, data: [string]) -> [Match] is
+    let mut res: [Match] = []
+    if pattern.len() == 0 is return res end
+    let prunes: [int] = pattern_cps(pattern)
+    let np: int = prunes.len()
+    let mut di: int = 0
+    while di < data.len() is
+        let s: string = data[di]
+        let n: int = s.len()
+        let mut matched: [int] = []
+        let mut mscore: int = 0
+        let mut pidx: int = 0
+        let mut best: int = -1
+        let mut midx: int = -1
+        let mut cur_adj: int = 0
+        let mut last: int = 0
+        let mut last_index: int = 0
+        let mut j: int = 0
+        let mut nextc: int = 0
+        let mut nexts: int = 0
+        if n > 0 is
+            let (c0, s0) = text::decode_at(s, 0)
+            nextc = c0
+            nexts = s0
+        end
+        while j < n is
+            let cand: int = nextc
+            let csz: int = nexts
+            if eq_fold(cand, prunes[pidx]) is
+                let mut score: int = 0
+                if j == 0 is score += 10 end
+                if last >= 97 && last <= 122 && cand >= 65 && cand <= 90 is score += 20 end
+                if j != 0 && is_sep(last) is score += 20 end
+                if matched.len() > 0 is
+                    let lm: int = matched[matched.len() - 1]
+                    let bonus: int = adjacent_bonus(last_index, lm, cur_adj)
+                    score += bonus
+                    cur_adj += bonus
+                end
+                if score > best is
+                    best = score
+                    midx = j
+                end
+            end
+            let mut nextp: int = 0
+            if pidx < np - 1 is nextp = prunes[pidx + 1] end
+            if j + csz < n is
+                let (nc, ns) = text::decode_at(s, j + csz)
+                nextc = nc
+                nexts = ns
+            else is
+                nextc = 0
+                nexts = 0
+            end
+            if eq_fold(nextp, nextc) || nextc == 0 is
+                if midx > -1 is
+                    if matched.len() == 0 is
+                        let penalty: int = midx * -5
+                        best += text::maxi(penalty, -15)
+                    end
+                    mscore += best
+                    matched.push(midx)
+                    best = -1
+                    pidx += 1
+                    midx = -1
+                    if pidx >= np is
+                        ;; pattern exhausted: remaining characters can't match
+                        pidx = np - 1
+                    end
+                end
+            end
+            last_index = j
+            last = cand
+            j += csz
+        end
+        mscore += matched.len() - n
+        if matched.len() == np is
+            res.push(Match { index: di, score: mscore, matched: matched })
+        end
+        di += 1
+    end
+    ;; bubbles sorts twice with Less = (>=); the two tie reversals cancel, so this is
+    ;; simply a stable sort by descending score
+    let mut i: int = 1
+    while i < res.len() is
+        let mut k: int = i
+        while k > 0 && res[k].score > res[k - 1].score is
+            let tmp: Match = res[k]
+            res[k] = res[k - 1]
+            res[k - 1] = tmp
+            k -= 1
+        end
+        i += 1
+    end
+    return res
+end
+
+fn pattern_cps(p: string) -> [int] is
+    let mut out: [int] = []
+    let mut i: int = 0
+    while i < p.len() is
+        let (cp, sz) = text::decode_at(p, i)
+        out.push(cp)
+        i += sz
+    end
+    return out
+end
