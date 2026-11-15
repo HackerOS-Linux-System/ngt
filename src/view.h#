@@ -1,0 +1,269 @@
+mod text
+mod lg
+mod flist
+mod vfs
+mod tinput
+mod editor
+mod theme
+mod model
+
+fn truncate_path(path: string, max_len: int) -> string is
+    if path.len() <= max_len is return path end
+    return "…" + path[path.len() - max_len + 1..path.len()]
+end
+
+fn dim(t: string) -> string is
+    return lg::render(lg::fg(lg::base(), theme::DIM), t)
+end
+
+fn muted(t: string) -> string is
+    return lg::render(lg::fg(lg::base(), theme::MUTED), t)
+end
+
+fn accent(t: string) -> string is
+    return lg::render(lg::fg(lg::base(), theme::ACCENT), t)
+end
+
+fn fbar(w: int) -> string is
+    let keys: [string] = ["F1", "F5", "F6", "F8", "^P", "^R", "^O", "^S", "Tab", "Q"]
+    let descs: [string] = ["Help", "Copy", "Move", "Delete", "Fuzzy", "Rename", "Shell", "Sort", "Switch", "Quit"]
+    let mut parts: [string] = []
+    let mut i: int = 0
+    while i < keys.len() is
+        parts.push(lg::render(theme::fbar_key(), keys[i]))
+        parts.push(lg::render(theme::fbar_desc(), descs[i]))
+        i += 1
+    end
+    let bar: string = lg::join_horizontal(parts)
+    return lg::render(lg::width(theme::fbar(), w), bar)
+end
+
+fn path_bar(m: model::Model, idx: int, w: int) -> string is
+    let p: model::Panel = m.panels[idx]
+    let tag: string = lg::render(theme::vfs_tag(), vfs::name(p.vfs))
+    let dir: string = lg::render(theme::path_style(), truncate_path(p.dir, w - 20))
+    let mut branch: string = ""
+    if p.branch != "" is
+        branch = " " + lg::render(theme::branch_style(), " " + p.branch + " ")
+    end
+    let sort: string = lg::render(theme::sort_tag(), model::sort_name(p.sort))
+    return lg::render(lg::width(lg::base(), w + 2), lg::join_horizontal([tag, " ", dir, branch, " ", sort]))
+end
+
+fn panel_view(m: model::Model, idx: int, w: int) -> string is
+    let p: model::Panel = m.panels[idx]
+    let list_view: string = flist::view(p.list)
+    let sel: int = model::sel_count(p)
+    let mut footer: string = ""
+    if sel > 0 is
+        footer = "\n" + lg::render(theme::warn_style(), "  " + to_string(sel) + " selected")
+    end
+    let content: string = list_view + footer
+    if idx == m.active is
+        return lg::render(lg::width(theme::active_panel(), w), content)
+    end
+    return lg::render(lg::width(theme::inactive_panel(), w), content)
+end
+
+pub fn render(m: model::Model) -> string is
+    if m.quitting is
+        return lg::render(lg::fg(lg::base(), theme::MUTED), "Goodbye from ngt.\n")
+    end
+    if m.sub_shell is return "" end
+    let mut w: int = m.w
+    if w < 40 is w = 80 end
+
+    let title_bar: string = lg::render(lg::width(theme::title_bar(), w),
+        lg::render(theme::app_name(), "  ngt ") + lg::render(theme::version_style(), theme::VERSION) + lg::render(lg::fg(lg::base(), theme::DIM), "  │  HackerOS file manager"))
+    let fb: string = fbar(w)
+    let status: string = lg::render(lg::width(theme::status_bar(), w), m.status)
+
+    if m.mode == model::MODE_PROGRESS is
+        let prog: string = lg::render(lg::pad(lg::width(lg::base(), w), 1, 2, 1, 2), progress_bar(m.progress, w - 4))
+        return lg::join_vertical([title_bar, prog, status, fb])
+    end
+
+    if m.mode == model::MODE_EDITOR is
+        let editor_bar: string = lg::render(lg::width(theme::title_bar(), w),
+            "  ✎ Editing: " + lg::render(lg::fg(lg::base(), theme::ACCENT), m.editor_file) + lg::render(lg::fg(lg::base(), theme::MUTED), "   Ctrl+S save  •  Esc cancel"))
+        let editor_view: string = lg::render(lg::width(theme::editor_box(), w - 2), editor::view(m.ed))
+        return lg::join_vertical([title_bar, editor_bar, editor_view, status, fb])
+    end
+
+    if m.mode == model::MODE_FUZZY is
+        let search_bar: string = lg::render(lg::width(theme::input_box(), w - 2), "  🔍 " + tinput::view(m.fuzzy))
+        let list_view: string = lg::render(lg::width(theme::inactive_panel(), w - 2), flist::view(m.panels[m.active].list))
+        let st: string = lg::render(lg::width(theme::status_bar(), w),
+            m.status + lg::render(lg::fg(lg::base(), theme::MUTED), "  " + to_string(m.fuzzy_results.len()) + " results  •  Enter: navigate  •  Esc: cancel"))
+        return lg::join_vertical([title_bar, search_bar, list_view, st, fb])
+    end
+
+    if m.mode == model::MODE_BULK is
+        let mut step: string = "Step 1/2: regex pattern"
+        if m.bulk_from != "" is step = "Step 2/2: replacement string" end
+        let header: string = lg::render(lg::width(theme::title_bar(), w), "  ✎ Bulk Rename   " + lg::render(lg::fg(lg::base(), theme::MUTED), step))
+        let input_view: string = lg::render(lg::width(theme::input_box(), w - 2), tinput::view(m.cmd))
+        return lg::join_vertical([title_bar, header, input_view, status, fb])
+    end
+
+    if m.mode == model::MODE_CONFIRM is
+        let dlg: string = lg::render(lg::width(theme::dialog(), 50),
+            lg::render(theme::error_style(), "⚠  Confirm Action") + "\n\n" + m.confirm_msg + "\n\n" + lg::render(lg::fg(lg::base(), theme::MUTED), "Press y to confirm, n to cancel"))
+        let centered: string = lg::place_center(w, 10, dlg)
+        return lg::join_vertical([title_bar, centered, fb])
+    end
+
+    if m.mode == model::MODE_PODMAN is
+        let header: string = lg::render(theme::podman_style(), " 🐳 Podman Containers ") + lg::render(lg::fg(lg::base(), theme::MUTED), "  Enter: connect  •  Esc: cancel")
+        let mut rows: [string] = []
+        let mut i: int = 0
+        while i < m.podman.len() is
+            let mut prefix: string = "  "
+            if i == 0 is prefix = lg::render(lg::fg(lg::base(), theme::ACCENT), "▶ ") end
+            rows.push(prefix + m.podman[i])
+            i += 1
+        end
+        if rows.len() == 0 is
+            rows = [lg::render(lg::fg(lg::base(), theme::MUTED), "  No running containers found")]
+        end
+        let box: string = lg::render(lg::width(theme::inactive_panel(), w - 2), __builtin_str_join(rows, "\n"))
+        return lg::join_vertical([title_bar, header, box, fb])
+    end
+
+    ;; explorer
+    let half_w: int = (w / 2) - 3
+    let path_row: string = lg::join_horizontal([path_bar(m, 0, half_w), path_bar(m, 1, half_w)])
+    let panels: string = lg::join_horizontal([panel_view(m, 0, half_w), panel_view(m, 1, half_w)])
+    let cmd_label: string = lg::render(theme::input_label(), "›")
+    let input_view: string = lg::render(lg::width(theme::input_box(), w - 6), tinput::view(m.cmd))
+    let cmd_row: string = lg::join_horizontal([cmd_label, input_view])
+    return lg::join_vertical([title_bar, path_row, panels, cmd_row, status, fb])
+end
+
+;; ── progress bar (bubbles/progress, gradient accent -> success, no percent) ─
+
+fn progress_bar(pct: f64, width: int) -> string is
+    let tw: int = text::maxi(0, width)
+    let mut fw: int = floor(((tw as f64) * pct) + 0.5)
+    if fw > tw is fw = tw end
+    if fw < 0 is fw = 0 end
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < fw is
+        let p: f64 = if fw == 1 is 0.5 else is (i as f64) / ((tw - 1) as f64) end
+        out = out + lg::render(lg::fg(lg::base(), blend_luv(theme::ACCENT, theme::SUCCESS, p)), "█")
+        i += 1
+    end
+    let e: string = lg::render(lg::fg(lg::base(), "#606060"), "░")
+    let n: int = text::maxi(0, tw - fw)
+    i = 0
+    while i < n is
+        out = out + e
+        i += 1
+    end
+    return out
+end
+
+;; colorful's BlendLuv for two "#rrggbb" colours.
+fn hexv(s: string, i: int) -> f64 is
+    let digits: string = "0123456789abcdef"
+    let a: string = string_lower(s[i..i + 1])
+    let b: string = string_lower(s[i + 1..i + 2])
+    let mut va: int = 0
+    let mut vb: int = 0
+    let mut k: int = 0
+    while k < 16 is
+        if digits[k..k + 1] == a is va = k end
+        if digits[k..k + 1] == b is vb = k end
+        k += 1
+    end
+    return ((va * 16 + vb) as f64) / 255.0
+end
+
+fn lin(c: f64) -> f64 is
+    if c <= 0.04045 is return c / 12.92 end
+    return pow((c + 0.055) / 1.055, 2.4)
+end
+
+fn delin(c: f64) -> f64 is
+    if c <= 0.0031308 is return 12.92 * c end
+    return 1.055 * pow(c, 1.0 / 2.4) - 0.055
+end
+
+fn cbrt_(x: f64) -> f64 is
+    return pow(x, 1.0 / 3.0)
+end
+
+fn hex2(v: f64) -> string is
+    let digits: string = "0123456789abcdef"
+    let mut n: int = floor(v * 255.0 + 0.5)
+    if n < 0 is n = 0 end
+    if n > 255 is n = 255 end
+    return digits[n / 16..n / 16 + 1] + digits[n % 16..n % 16 + 1]
+end
+
+fn blend_luv(c1: string, c2: string, t: f64) -> string is
+    let r1: f64 = lin(hexv(c1, 1))
+    let g1: f64 = lin(hexv(c1, 3))
+    let b1: f64 = lin(hexv(c1, 5))
+    let r2: f64 = lin(hexv(c2, 1))
+    let g2: f64 = lin(hexv(c2, 3))
+    let b2: f64 = lin(hexv(c2, 5))
+    ;; linear rgb -> XYZ
+    let x1: f64 = 0.4124564 * r1 + 0.3575761 * g1 + 0.1804375 * b1
+    let y1: f64 = 0.2126729 * r1 + 0.7151522 * g1 + 0.0721750 * b1
+    let z1: f64 = 0.0193339 * r1 + 0.1191920 * g1 + 0.9503041 * b1
+    let x2: f64 = 0.4124564 * r2 + 0.3575761 * g2 + 0.1804375 * b2
+    let y2: f64 = 0.2126729 * r2 + 0.7151522 * g2 + 0.0721750 * b2
+    let z2: f64 = 0.0193339 * r2 + 0.1191920 * g2 + 0.9503041 * b2
+    let wx: f64 = 0.95047
+    let wy: f64 = 1.0
+    let wz: f64 = 1.08883
+    ;; XYZ -> Luv
+    let d1: f64 = x1 + 15.0 * y1 + 3.0 * z1
+    let d2: f64 = x2 + 15.0 * y2 + 3.0 * z2
+    let dn: f64 = wx + 15.0 * wy + 3.0 * wz
+    let un: f64 = 4.0 * wx / dn
+    let vn: f64 = 9.0 * wy / dn
+    let yr1: f64 = y1 / wy
+    let yr2: f64 = y2 / wy
+    let mut l1: f64 = 116.0 * cbrt_(yr1) - 16.0
+    if yr1 <= 0.008856 is l1 = 903.3 * yr1 end
+    let mut l2: f64 = 116.0 * cbrt_(yr2) - 16.0
+    if yr2 <= 0.008856 is l2 = 903.3 * yr2 end
+    let mut u1: f64 = 0.0
+    let mut v1: f64 = 0.0
+    if d1 > 0.0 is
+        u1 = 13.0 * l1 * (4.0 * x1 / d1 - un)
+        v1 = 13.0 * l1 * (9.0 * y1 / d1 - vn)
+    end
+    let mut u2: f64 = 0.0
+    let mut v2: f64 = 0.0
+    if d2 > 0.0 is
+        u2 = 13.0 * l2 * (4.0 * x2 / d2 - un)
+        v2 = 13.0 * l2 * (9.0 * y2 / d2 - vn)
+    end
+    let l: f64 = l1 + t * (l2 - l1)
+    let u: f64 = u1 + t * (u2 - u1)
+    let v: f64 = v1 + t * (v2 - v1)
+    ;; Luv -> XYZ
+    let mut y: f64 = 0.0
+    let mut x: f64 = 0.0
+    let mut z: f64 = 0.0
+    if l > 0.0 is
+        if l <= 8.0 is
+            y = wy * l / 903.3
+        else is
+            let f: f64 = (l + 16.0) / 116.0
+            y = wy * f * f * f
+        end
+        let up: f64 = u / (13.0 * l) + un
+        let vp: f64 = v / (13.0 * l) + vn
+        x = y * 9.0 * up / (4.0 * vp)
+        z = y * (12.0 - 3.0 * up - 20.0 * vp) / (4.0 * vp)
+    end
+    let r: f64 = 3.2404542 * x - 1.5371385 * y - 0.4985314 * z
+    let g: f64 = -0.9692660 * x + 1.8760108 * y + 0.0415560 * z
+    let b: f64 = 0.0556434 * x - 0.2040259 * y + 1.0572252 * z
+    return "#" + hex2(delin(r)) + hex2(delin(g)) + hex2(delin(b))
+end
