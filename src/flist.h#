@@ -1,0 +1,579 @@
+mod text
+mod lg
+mod fuzzy
+mod tinput
+mod theme
+
+pub struct Item is
+    pub title: string
+    pub status: string
+    pub selected: bool
+    pub is_dir: bool
+    pub size: int
+    pub mtime: int
+    pub stamp: string
+end
+
+pub struct FL is
+    pub items: [Item]
+    pub vis: [int]            ;; indexes of visible items while filtering
+    pub matches: [[int]]      ;; matched byte indexes per visible item
+    pub fstate: int           ;; 0 unfiltered, 1 filtering, 2 applied
+    pub filter: tinput::TI
+    pub cursor: int
+    pub page: int
+    pub per_page: int
+    pub total_pages: int
+    pub width: int
+    pub height: int
+    pub title: string
+    pub show_all: bool
+    pub kb_items: bool        ;; keybinding flags captured by updateKeybindings
+    pub kb_pages: bool
+end
+
+pub fn make(title: string) -> FL is
+    let mut f: tinput::TI = tinput::make("Filter: ", "")
+    f.prompt_fg = "#ECFD65"
+    f.limit = 64
+    tinput::do_focus(&mut f)
+    let mut l: FL = FL { items: [], vis: [], matches: [], fstate: 0, filter: f, cursor: 0, page: 0, per_page: 1, total_pages: 1, width: 0, height: 0, title: title, show_all: false, kb_items: false, kb_pages: false }
+    update_pagination(&mut l)
+    update_keybindings(&mut l)
+    return l
+end
+
+;; ── item text (model.go: Title / Description) ──────────────────────────────
+
+fn item_title(i: Item) -> string is
+    let mut prefix: string = "  "
+    if i.selected is prefix = theme::SELECTED_MARKER + " " end
+    let mut t: string = ""
+    if i.is_dir is
+        t = lg::render(theme::dir_style(), i.title + "/")
+    else is
+        t = lg::render(theme::file_style(), i.title)
+    end
+    if i.status != "" is
+        let c: string = i.status[0..1]
+        if c == "M" is t = lg::render(theme::git_modified(), i.title) end
+        if c == "A" is t = lg::render(theme::git_added(), i.title) end
+        if c == "D" is t = lg::render(theme::git_deleted(), i.title) end
+    end
+    return prefix + t
+end
+
+fn item_desc(i: Item) -> string is
+    let kind: string = if i.is_dir is "dir " else is "file" end
+    return kind + " │ " + text::human_size(i.size) + " │ " + i.stamp
+end
+
+;; ── visibility helpers ─────────────────────────────────────────────────────
+
+pub fn vcount(l: FL) -> int is
+    if l.fstate != 0 is return l.vis.len() end
+    return l.items.len()
+end
+
+pub fn vitem(l: FL, i: int) -> Item is
+    if l.fstate != 0 is return l.items[l.vis[i]] end
+    return l.items[i]
+end
+
+pub fn index(l: FL) -> int is
+    return l.page * l.per_page + l.cursor
+end
+
+;; SelectedItem: (ok, item)
+pub fn selected(l: FL) -> (bool, Item) is
+    let i: int = index(l)
+    let n: int = vcount(l)
+    if i < 0 || n == 0 || n <= i is
+        return (false, Item { title: "", status: "", selected: false, is_dir: false, size: 0, mtime: 0, stamp: "" })
+    end
+    return (true, vitem(l, i))
+end
+
+fn items_on_page(l: FL) -> int is
+    let n: int = vcount(l)
+    let start: int = l.page * l.per_page
+    let stop: int = text::mini(start + l.per_page, n)
+    return stop - start
+end
+
+fn on_last_page(l: FL) -> bool is
+    return l.page == l.total_pages - 1
+end
+
+;; ── layout ─────────────────────────────────────────────────────────────────
+
+fn title_view(l: FL) -> string is
+    let mut v: string = ""
+    if l.fstate == 1 is
+        v = tinput::view(l.filter)
+    else is
+        v = lg::render(theme::panel_title(), l.title)
+        v = v + "  "
+        v = text::trunc_tail(v, l.width - 1, "…")
+    end
+    if v.len() > 0 is
+        return lg::render(lg::pad(lg::base(), 0, 0, 1, 2), v)
+    end
+    return v
+end
+
+fn status_view(l: FL) -> string is
+    let total: int = l.items.len()
+    let visible: int = vcount(l)
+    let name: string = if visible != 1 is "items" else is "item" end
+    let disp: string = to_string(visible) + " " + name
+    let mut status: string = ""
+    if l.fstate == 1 is
+        if visible == 0 is
+            status = lg::render(lg::fg(lg::base(), "#5C5C5C"), "Nothing matched")
+        else is
+            status = disp
+        end
+    elsif total == 0 is
+        status = lg::render(lg::fg(lg::base(), "#5C5C5C"), "No items")
+    else is
+        if l.fstate == 2 is
+            let mut f: string = string_trim(tinput::val(l.filter))
+            f = text::trunc_tail(f, 10, "…")
+            status = status + "“" + f + "” "
+        end
+        status = status + disp
+    end
+    let nf: int = total - visible
+    if nf > 0 is
+        status = status + lg::render(lg::fg(lg::base(), "#3C3C3C"), " • ")
+        status = status + lg::render(lg::fg(lg::base(), "#3C3C3C"), to_string(nf) + " filtered")
+    end
+    return lg::render(lg::pad(lg::fg(lg::base(), "#777777"), 0, 0, 1, 2), status)
+end
+
+fn pagination_view(l: FL) -> string is
+    if l.total_pages < 2 is return "" end
+    let mut s: string = ""
+    let mut i: int = 0
+    while i < l.total_pages is
+        if i == l.page is
+            s = s + lg::render(lg::fg(lg::base(), "#979797"), "•")
+        else is
+            s = s + lg::render(lg::fg(lg::base(), "#3C3C3C"), "•")
+        end
+        i += 1
+    end
+    if text::width(s) > l.width is
+        s = lg::render(lg::fg(lg::base(), "#5C5C5C"), to_string(l.page + 1) + "/" + to_string(l.total_pages))
+    end
+    return lg::render(lg::pad(lg::base(), 0, 0, 0, 2), s)
+end
+
+;; (key, description, enabled) lists for the help view
+fn help_bindings(l: FL) -> [[string]] is
+    let filtering: bool = l.fstate == 1
+    let mut b: [[string]] = []
+    b.push(["↑/k", "up", if !filtering && l.kb_items is "1" else is "0" end])
+    b.push(["↓/j", "down", if !filtering && l.kb_items is "1" else is "0" end])
+    b.push(["/", "filter", if !filtering && l.kb_items is "1" else is "0" end])
+    b.push(["esc", "clear filter", if !filtering && l.fstate == 2 is "1" else is "0" end])
+    b.push(["enter", "apply filter", if filtering && tinput::val(l.filter) != "" is "1" else is "0" end])
+    b.push(["esc", "cancel", if filtering is "1" else is "0" end])
+    b.push(["q", "quit", if !filtering is "1" else is "0" end])
+    b.push(["?", if l.show_all is "close help" else is "more" end, if !filtering is "1" else is "0" end])
+    return b
+end
+
+fn help_short(l: FL) -> string is
+    let bs: [[string]] = help_bindings(l)
+    let sep: string = lg::render(lg::inl(lg::fg(lg::base(), "#3C3C3C")), " • ")
+    let mut out: string = ""
+    let mut total: int = 0
+    for b in bs is
+        if b[2] == "1" is
+            let mut s: string = ""
+            if total > 0 is s = sep end
+            s = s + lg::render(lg::inl(lg::fg(lg::base(), "#626262")), b[0]) + " " + lg::render(lg::inl(lg::fg(lg::base(), "#4A4A4A")), b[1])
+            let w: int = text::width(s)
+            if l.width > 0 && total + w > l.width is
+                let tail: string = " " + lg::render(lg::inl(lg::fg(lg::base(), "#3C3C3C")), "…")
+                if total + text::width(tail) < l.width is out = out + tail end
+                return out
+            end
+            total += w
+            out = out + s
+        end
+    end
+    return out
+end
+
+fn help_full(l: FL) -> string is
+    let filtering: bool = l.fstate == 1
+    let on: string = if !filtering && l.kb_items is "1" else is "0" end
+    let pg: string = if !filtering && l.kb_pages is "1" else is "0" end
+    let groups: [[[string]]] = [
+        [["↑/k", "up", on], ["↓/j", "down", on], ["→/l/pgdn", "next page", pg], ["←/h/pgup", "prev page", pg], ["g/home", "go to start", on], ["G/end", "go to end", on]],
+        [["/", "filter", on], ["esc", "clear filter", if !filtering && l.fstate == 2 is "1" else is "0" end], ["enter", "apply filter", if filtering && tinput::val(l.filter) != "" is "1" else is "0" end], ["esc", "cancel", if filtering is "1" else is "0" end]],
+        [["q", "quit", if !filtering is "1" else is "0" end], ["?", "close help", if !filtering is "1" else is "0" end]]
+    ]
+    let key_st: lg::Sty = lg::fg(lg::base(), "#626262")
+    let desc_st: lg::Sty = lg::fg(lg::base(), "#4A4A4A")
+    let sep: string = lg::render(lg::fg(lg::base(), "#3C3C3C"), "    ")
+    let sepw: int = text::width(sep)
+    let mut cols: [string] = []
+    let mut total: int = 0
+    let mut gi: int = 0
+    while gi < groups.len() is
+        let g: [[string]] = groups[gi]
+        let mut keys: [string] = []
+        let mut descs: [string] = []
+        for b in g is
+            if b[2] == "1" is
+                keys.push(b[0])
+                descs.push(b[1])
+            end
+        end
+        if keys.len() > 0 is
+            let col: string = lg::join_horizontal([lg::render(key_st, __builtin_str_join(keys, "\n")), lg::render(key_st, " "), lg::render(desc_st, __builtin_str_join(descs, "\n"))])
+            total += text::block_w(col)
+            if l.width > 0 && total > l.width is break end
+            cols.push(col)
+            if gi < g.len() - 1 is
+                total += sepw
+                if l.width > 0 && total > l.width is break end
+            end
+            cols.push(sep)
+        end
+        gi += 1
+    end
+    return lg::join_horizontal(cols)
+end
+
+fn help_view(l: FL) -> string is
+    let body: string = if l.show_all is help_full(l) else is help_short(l) end
+    return lg::render(lg::pad(lg::base(), 1, 0, 0, 2), body)
+end
+
+pub fn update_pagination(l: &mut FL) is
+    let idx: int = index(l)
+    let mut avail: int = l.height
+    avail -= text::block_h(title_view(l))
+    avail -= text::block_h(status_view(l))
+    avail -= text::block_h(pagination_view(l))
+    avail -= text::block_h(help_view(l))
+    l.per_page = text::maxi(1, avail / 3)
+    let n: int = vcount(l)
+    if n < 1 is
+        l.total_pages = 1
+    else is
+        let mut pages: int = n / l.per_page
+        if n % l.per_page > 0 is pages += 1 end
+        l.total_pages = pages
+    end
+    l.page = idx / l.per_page
+    l.cursor = idx % l.per_page
+    if l.page >= l.total_pages - 1 is l.page = text::maxi(0, l.total_pages - 1) end
+end
+
+fn update_keybindings(l: &mut FL) is
+    l.kb_items = l.items.len() != 0
+    l.kb_pages = l.total_pages > 1
+end
+
+pub fn set_size(l: &mut FL, w: int, h: int) is
+    l.width = w
+    l.height = h
+    l.filter.width = w - 8 - 1
+    update_pagination(l)
+end
+
+;; ── filtering ──────────────────────────────────────────────────────────────
+
+fn all_visible(l: &mut FL) is
+    let mut v: [int] = []
+    let mut m: [[int]] = []
+    let mut i: int = 0
+    while i < l.items.len() is
+        v.push(i)
+        m.push([])
+        i += 1
+    end
+    l.vis = v
+    l.matches = m
+end
+
+fn run_filter(l: &mut FL) is
+    let term: string = tinput::val(l.filter)
+    if term == "" || l.fstate == 0 is
+        all_visible(l)
+        return
+    end
+    let mut targets: [string] = []
+    for it in l.items is targets.push(it.title) end
+    let ms: [fuzzy::Match] = fuzzy::find(term, targets)
+    let mut v: [int] = []
+    let mut m: [[int]] = []
+    for x in ms is
+        v.push(x.index)
+        m.push(x.matched)
+    end
+    l.vis = v
+    l.matches = m
+end
+
+pub fn set_items(l: &mut FL, items: [Item]) is
+    l.items = items
+    if l.fstate != 0 is run_filter(l) end
+    update_pagination(l)
+    update_keybindings(l)
+end
+
+fn reset_filtering(l: &mut FL) is
+    if l.fstate == 0 is return end
+    l.fstate = 0
+    tinput::reset(&mut l.filter)
+    l.vis = []
+    l.matches = []
+    update_pagination(l)
+    update_keybindings(l)
+end
+
+;; ── cursor movement ────────────────────────────────────────────────────────
+
+pub fn cursor_up(l: &mut FL) is
+    l.cursor -= 1
+    if l.cursor < 0 && l.page == 0 is
+        l.cursor = 0
+        return
+    end
+    if l.cursor >= 0 is return end
+    if l.page > 0 is l.page -= 1 end
+    l.cursor = items_on_page(l) - 1
+end
+
+pub fn cursor_down(l: &mut FL) is
+    let on_page: int = items_on_page(l)
+    l.cursor += 1
+    if l.cursor < on_page is return end
+    if !on_last_page(l) is
+        l.page += 1
+        l.cursor = 0
+        return
+    end
+    if l.cursor > on_page is
+        l.cursor = 0
+        return
+    end
+    l.cursor = on_page - 1
+end
+
+fn is_key(k: string, set: [string]) -> bool is
+    for s in set is
+        if s == k is return true end
+    end
+    return false
+end
+
+fn fix_cursor(l: &mut FL) is
+    let on_page: int = items_on_page(l)
+    if l.cursor > on_page - 1 is l.cursor = text::maxi(0, on_page - 1) end
+end
+
+;; One key press. Returns true when the list asks the program to quit.
+pub fn update(l: &mut FL, key: string) -> bool is
+    if key == "ctrl+c" is return true end
+    if l.fstate == 1 is
+        handle_filtering(l, key)
+        return false
+    end
+    return handle_browsing(l, key)
+end
+
+fn handle_browsing(l: &mut FL, key: string) -> bool is
+    let n: int = vcount(l)
+    if key == "esc" && l.fstate == 2 is
+        reset_filtering(l)
+    elsif is_key(key, ["q", "esc"]) is
+        return true
+    elsif is_key(key, ["up", "k"]) && l.kb_items is
+        cursor_up(l)
+    elsif is_key(key, ["down", "j"]) && l.kb_items is
+        cursor_down(l)
+    elsif is_key(key, ["left", "h", "pgup", "b", "u"]) && l.kb_pages is
+        if l.page > 0 is l.page -= 1 end
+    elsif is_key(key, ["right", "l", "pgdown", "f", "d"]) && l.kb_pages is
+        if !on_last_page(l) is l.page += 1 end
+    elsif is_key(key, ["home", "g"]) && l.kb_items is
+        l.page = 0
+        l.cursor = 0
+    elsif is_key(key, ["end", "G"]) && l.kb_items is
+        l.page = l.total_pages - 1
+        l.cursor = items_on_page(l) - 1
+    elsif key == "/" && l.kb_items is
+        if tinput::val(l.filter) == "" is all_visible(l) end
+        l.page = 0
+        l.cursor = 0
+        l.fstate = 1
+        tinput::cursor_end(&mut l.filter)
+        tinput::do_focus(&mut l.filter)
+        update_keybindings(l)
+        return false
+    elsif key == "?" is
+        let min_help: bool = l.kb_items
+        if l.show_all || min_help is
+            l.show_all = !l.show_all
+            update_pagination(l)
+        end
+    end
+    fix_cursor(l)
+    return false
+end
+
+fn handle_filtering(l: &mut FL, key: string) is
+    let before: string = tinput::val(l.filter)
+    if key == "esc" is
+        reset_filtering(l)
+    elsif is_key(key, ["enter", "tab", "shift+tab", "ctrl+k", "up", "ctrl+j", "down"]) && before != "" is
+        if l.items.len() != 0 is
+            if vcount(l) == 0 is
+                reset_filtering(l)
+            else is
+                tinput::do_blur(&mut l.filter)
+                l.fstate = 2
+                update_keybindings(l)
+            end
+        end
+    end
+    tinput::update(&mut l.filter, key)
+    let after: string = tinput::val(l.filter)
+    if after != before is run_filter(l) end
+    update_pagination(l)
+end
+
+;; ── rendering ──────────────────────────────────────────────────────────────
+
+;; lipgloss.StyleRunes — style each run of matched / unmatched runes.
+fn style_runes(s: string, idx: [int], matched: lg::Sty, unmatched: lg::Sty) -> string is
+    let rs: [string] = text::runes(s)
+    let mut out: string = ""
+    let mut group: string = ""
+    let mut i: int = 0
+    while i < rs.len() is
+        group = group + rs[i]
+        let m: bool = has_int(idx, i)
+        let nm: bool = has_int(idx, i + 1)
+        if m != nm || i == rs.len() - 1 is
+            if m is
+                out = out + lg::render(matched, group)
+            else is
+                out = out + lg::render(unmatched, group)
+            end
+            group = ""
+        end
+        i += 1
+    end
+    return out
+end
+
+fn has_int(a: [int], x: int) -> bool is
+    for y in a is
+        if y == x is return true end
+    end
+    return false
+end
+
+fn normal_title() -> lg::Sty is
+    return lg::pad(lg::fg(lg::base(), theme::TEXT), 0, 0, 0, 2)
+end
+
+fn normal_desc() -> lg::Sty is
+    return lg::pad(lg::fg(lg::base(), theme::MUTED), 0, 0, 0, 2)
+end
+
+fn selected_title() -> lg::Sty is
+    let s: lg::Sty = lg::sides(lg::base(), "thick", false, false, false, true, theme::ACCENT)
+    return lg::pad(lg::bold(lg::bg(lg::fg(s, theme::ACCENT), theme::SURFACE2)), 0, 0, 0, 1)
+end
+
+fn selected_desc() -> lg::Sty is
+    let s: lg::Sty = lg::sides(lg::base(), "normal", false, false, false, true, "#AD58B4")
+    return lg::pad(lg::bg(lg::fg(s, theme::MUTED), theme::SURFACE2), 0, 0, 0, 1)
+end
+
+fn render_item(l: FL, index: int, it: Item) -> string is
+    if l.width <= 0 is return "" end
+    let textw: int = l.width - 2
+    let mut title: string = text::trunc_tail(item_title(it), textw, "…")
+    let mut desc: string = text::trunc_tail(item_desc(it), textw, "…")
+    let is_sel: bool = index == index_of(l)
+    let empty_filter: bool = l.fstate == 1 && tinput::val(l.filter) == ""
+    let is_filtered: bool = l.fstate == 1 || l.fstate == 2
+    let mut matched_runes: [int] = []
+    if is_filtered && index < l.vis.len() is matched_runes = l.matches[index] end
+    if empty_filter is
+        title = lg::render(lg::pad(lg::fg(lg::base(), "#777777"), 0, 0, 0, 2), title)
+        desc = lg::render(lg::pad(lg::fg(lg::base(), "#4D4D4D"), 0, 0, 0, 2), desc)
+    elsif is_sel && l.fstate != 1 is
+        if is_filtered is
+            let un: lg::Sty = lg::inl(selected_title())
+            title = style_runes(title, matched_runes, lg::underline(un), un)
+        end
+        title = lg::render(selected_title(), title)
+        desc = lg::render(selected_desc(), desc)
+    else is
+        if is_filtered is
+            let un2: lg::Sty = lg::inl(normal_title())
+            title = style_runes(title, matched_runes, lg::underline(un2), un2)
+        end
+        title = lg::render(normal_title(), title)
+        desc = lg::render(normal_desc(), desc)
+    end
+    return title + "\n" + desc
+end
+
+fn index_of(l: FL) -> int is
+    return l.page * l.per_page + l.cursor
+end
+
+fn populated_view(l: FL) -> string is
+    let n: int = vcount(l)
+    if n == 0 is
+        if l.fstate == 1 is return "" end
+        return lg::render(lg::fg(lg::base(), "#626262"), "No items.")
+    end
+    let start: int = l.page * l.per_page
+    let stop: int = text::mini(start + l.per_page, n)
+    let mut b: string = ""
+    let mut i: int = start
+    while i < stop is
+        b = b + render_item(l, i, vitem(l, i))
+        if i != stop - 1 is b = b + "\n\n" end
+        i += 1
+    end
+    let on_page: int = stop - start
+    if on_page < l.per_page is
+        let k: int = (l.per_page - on_page) * 3
+        b = b + text::rep("\n", k)
+    end
+    return b
+end
+
+pub fn view(l: FL) -> string is
+    let mut sections: [string] = []
+    let mut avail: int = l.height
+    let tv: string = title_view(l)
+    sections.push(tv)
+    avail -= text::block_h(tv)
+    let sv: string = status_view(l)
+    sections.push(sv)
+    avail -= text::block_h(sv)
+    let pv: string = pagination_view(l)
+    avail -= text::block_h(pv)
+    let hv: string = help_view(l)
+    avail -= text::block_h(hv)
+    sections.push(lg::render(lg::height(lg::base(), avail), populated_view(l)))
+    sections.push(pv)
+    sections.push(hv)
+    return lg::join_vertical(sections)
+end
