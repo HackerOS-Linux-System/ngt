@@ -1,0 +1,262 @@
+mod text
+mod lg
+
+pub struct Ed is
+    pub lines: [string]
+    pub row: int
+    pub col: int          ;; rune index
+    pub top: int
+    pub width: int        ;; total width incl. prompt + line numbers
+    pub height: int
+    pub blink_hidden: bool
+end
+
+pub fn make() -> Ed is
+    return Ed { lines: [""], row: 0, col: 0, top: 0, width: 80, height: 6, blink_hidden: false }
+end
+
+pub fn set_size(e: &mut Ed, w: int, h: int) is
+    e.width = w
+    e.height = h
+end
+
+pub fn set_value(e: &mut Ed, s: string) is
+    e.lines = str_split(s, "\n")
+    e.row = e.lines.len() - 1
+    e.col = text::rune_count(e.lines[e.row])
+    e.top = 0
+    scroll_to_cursor(e)
+end
+
+pub fn value(e: Ed) -> string is
+    return __builtin_str_join(e.lines, "\n")
+end
+
+fn rlen(s: string) -> int is
+    return text::rune_count(s)
+end
+
+fn take(s: string, n: int) -> string is
+    let rs: [string] = text::runes(s)
+    let mut o: string = ""
+    let mut i: int = 0
+    while i < n && i < rs.len() is
+        o = o + rs[i]
+        i += 1
+    end
+    return o
+end
+
+fn drop(s: string, n: int) -> string is
+    let rs: [string] = text::runes(s)
+    let mut o: string = ""
+    let mut i: int = n
+    while i < rs.len() is
+        o = o + rs[i]
+        i += 1
+    end
+    return o
+end
+
+fn scroll_to_cursor(e: &mut Ed) is
+    let vis: int = text::maxi(1, e.height)
+    if e.row < e.top is e.top = e.row end
+    if e.row >= e.top + vis is e.top = e.row - vis + 1 end
+end
+
+fn is_sp(r: string) -> bool is
+    return r == " " || r == "\t"
+end
+
+fn word_back_col(line: string, col: int) -> int is
+    let rs: [string] = text::runes(line)
+    let mut p: int = col
+    while p > 0 && is_sp(rs[p - 1]) is p -= 1 end
+    while p > 0 && !is_sp(rs[p - 1]) is p -= 1 end
+    return p
+end
+
+fn word_fwd_col(line: string, col: int) -> int is
+    let rs: [string] = text::runes(line)
+    let mut p: int = col
+    while p < rs.len() && is_sp(rs[p]) is p += 1 end
+    while p < rs.len() && !is_sp(rs[p]) is p += 1 end
+    return p
+end
+
+fn insert_line_after(e: &mut Ed, at: int, s: string) is
+    let mut nl: [string] = []
+    let mut i: int = 0
+    while i < e.lines.len() is
+        nl.push(e.lines[i])
+        if i == at is nl.push(s) end
+        i += 1
+    end
+    e.lines = nl
+end
+
+fn remove_line(e: &mut Ed, at: int) is
+    let mut nl: [string] = []
+    let mut i: int = 0
+    while i < e.lines.len() is
+        if i != at is nl.push(e.lines[i]) end
+        i += 1
+    end
+    e.lines = nl
+end
+
+fn clamp_col(e: &mut Ed) is
+    let n: int = rlen(e.lines[e.row])
+    if e.col > n is e.col = n end
+    if e.col < 0 is e.col = 0 end
+end
+
+pub fn update(e: &mut Ed, key: string) is
+    e.blink_hidden = false
+    let line: string = e.lines[e.row]
+    let n: int = rlen(line)
+    if key == "enter" is
+        let head: string = take(line, e.col)
+        let tail: string = drop(line, e.col)
+        e.lines[e.row] = head
+        insert_line_after(e, e.row, tail)
+        e.row += 1
+        e.col = 0
+    elsif key == "backspace" || key == "ctrl+h" is
+        if e.col > 0 is
+            e.lines[e.row] = take(line, e.col - 1) + drop(line, e.col)
+            e.col -= 1
+        elsif e.row > 0 is
+            let prev: string = e.lines[e.row - 1]
+            e.col = rlen(prev)
+            e.lines[e.row - 1] = prev + line
+            remove_line(e, e.row)
+            e.row -= 1
+        end
+    elsif key == "delete" || key == "ctrl+d" is
+        if e.col < n is
+            e.lines[e.row] = take(line, e.col) + drop(line, e.col + 1)
+        elsif e.row < e.lines.len() - 1 is
+            e.lines[e.row] = line + e.lines[e.row + 1]
+            remove_line(e, e.row + 1)
+        end
+    elsif key == "left" || key == "ctrl+b" is
+        if e.col > 0 is
+            e.col -= 1
+        elsif e.row > 0 is
+            e.row -= 1
+            e.col = rlen(e.lines[e.row])
+        end
+    elsif key == "right" || key == "ctrl+f" is
+        if e.col < n is
+            e.col += 1
+        elsif e.row < e.lines.len() - 1 is
+            e.row += 1
+            e.col = 0
+        end
+    elsif key == "up" || key == "ctrl+p" is
+        if e.row > 0 is e.row -= 1 end
+        clamp_col(e)
+    elsif key == "down" || key == "ctrl+n" is
+        if e.row < e.lines.len() - 1 is e.row += 1 end
+        clamp_col(e)
+    elsif key == "home" || key == "ctrl+a" is
+        e.col = 0
+    elsif key == "end" || key == "ctrl+e" is
+        e.col = n
+    elsif key == "ctrl+k" is
+        e.lines[e.row] = take(line, e.col)
+    elsif key == "ctrl+u" is
+        e.lines[e.row] = drop(line, e.col)
+        e.col = 0
+    elsif key == "ctrl+w" || key == "alt+backspace" is
+        let nc: int = word_back_col(line, e.col)
+        e.lines[e.row] = take(line, nc) + drop(line, e.col)
+        e.col = nc
+    elsif key == "alt+d" || key == "alt+delete" is
+        let nc2: int = word_fwd_col(line, e.col)
+        e.lines[e.row] = take(line, e.col) + drop(line, nc2)
+    elsif key == "alt+left" || key == "ctrl+left" || key == "alt+b" is
+        e.col = word_back_col(line, e.col)
+    elsif key == "alt+right" || key == "ctrl+right" || key == "alt+f" is
+        e.col = word_fwd_col(line, e.col)
+    elsif key == "alt+<" || key == "ctrl+home" is
+        e.row = 0
+        e.col = 0
+    elsif key == "alt+>" || key == "ctrl+end" is
+        e.row = e.lines.len() - 1
+        e.col = rlen(e.lines[e.row])
+    elsif key == "pgup" is
+        e.row = text::maxi(0, e.row - e.height)
+        clamp_col(e)
+    elsif key == "pgdown" is
+        e.row = text::mini(e.lines.len() - 1, e.row + e.height)
+        clamp_col(e)
+    elsif key == "tab" is
+        e.lines[e.row] = take(line, e.col) + "\t" + drop(line, e.col)
+        e.col += 1
+    else is
+        let ins: string = if key == "space" is " " else is key end
+        if text::rune_count(ins) == 1 && text::byte_at(ins, 0) >= 32 is
+            e.lines[e.row] = take(line, e.col) + ins + drop(line, e.col)
+            e.col += 1
+        end
+    end
+    scroll_to_cursor(e)
+end
+
+pub fn view(e: Ed) -> string is
+    let digits: int = text::maxi(3, rlen(to_string(e.lines.len())))
+    let text_w: int = text::maxi(1, e.width - 2 - (digits + 1))
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < e.height is
+        let r: int = e.top + i
+        let cur_line: bool = r == e.row
+        let mut row_bg: string = ""
+        if cur_line is row_bg = "0" end
+        let prompt_st: lg::Sty = lg::bg(lg::fg(lg::base(), "7"), row_bg)
+        let mut line: string = lg::render(prompt_st, "┃ ")
+        if r < e.lines.len() is
+            let num: string = text::pad_left(to_string(r + 1), digits) + " "
+            let num_st: lg::Sty = if cur_line is lg::bg(lg::base(), row_bg) else is lg::fg(lg::base(), "7") end
+            line = line + lg::render(num_st, num)
+            let content: string = e.lines[r]
+            let body_st: lg::Sty = lg::bg(lg::base(), row_bg)
+            if cur_line is
+                let before: string = take(content, e.col)
+                let rs: [string] = text::runes(content)
+                let ch: string = if e.col < rs.len() is rs[e.col] else is " " end
+                let after: string = drop(content, e.col + 1)
+                let mut cs: lg::Sty = lg::inl(body_st)
+                if !e.blink_hidden is cs.reverse = true end
+                let used: int = text::width(before) + text::width(ch) + text::width(after)
+                line = line + lg::render(body_st, before) + lg::render(cs, ch) + lg::render(body_st, after) + lg::render(body_st, text::spaces(text_w - used))
+            else is
+                line = line + lg::render(body_st, text::pad_right(text::cut(content, text_w), text_w))
+            end
+        else is
+            let eob: lg::Sty = lg::fg(lg::base(), "0")
+            line = line + lg::render(eob, text::pad_left("~", digits) + " ") + text::spaces(text_w)
+        end
+        out.push(line)
+        i += 1
+    end
+    return __builtin_str_join(out, "\n")
+end
+
+pub fn insert_text(e: &mut Ed, s: string) is
+    let clean: string = string_replace(string_replace(s, "\r\n", "\n"), "\r", "\n")
+    let mut first: bool = true
+    for part in str_split(clean, "\n") is
+        if !first is update(e, "enter") end
+        first = false
+        for r in text::runes(part) is
+            if r == "\t" is
+                update(e, "tab")
+            elsif text::byte_at(r, 0) >= 32 is
+                update(e, r)
+            end
+        end
+    end
+end
