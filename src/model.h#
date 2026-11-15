@@ -1,0 +1,97 @@
+mod text
+mod flist
+mod vfs
+mod tinput
+mod editor
+
+pub const MODE_EXPLORER: int = 0
+pub const MODE_EDITOR: int = 1
+pub const MODE_PROGRESS: int = 2
+pub const MODE_FUZZY: int = 3
+pub const MODE_BULK: int = 4
+pub const MODE_CONFIRM: int = 5
+pub const MODE_PODMAN: int = 6
+
+pub struct Panel is
+    pub dir: string
+    pub branch: string
+    pub list: flist::FL
+    pub selected: [string]
+    pub vfs: vfs::Vfs
+    pub sort: int
+end
+
+pub struct Model is
+    pub panels: [Panel]
+    pub active: int
+    pub cmd: tinput::TI
+    pub status: string
+    pub mode: int
+    pub ed: editor::Ed
+    pub editor_file: string
+    pub progress: f64
+    pub quitting: bool
+    pub fuzzy: tinput::TI
+    pub fuzzy_results: [string]
+    pub bulk_from: string
+    pub bulk_to: string
+    pub confirm_msg: string
+    pub confirm_action: string
+    pub podman: [string]
+    pub sub_shell: bool
+    pub w: int
+    pub h: int
+    pub blink_epoch: int
+    pub want_suspend: bool
+    pub want_shell: bool
+end
+
+pub fn sort_name(s: int) -> string is
+    if s == 1 is return "Size" end
+    if s == 2 is return "Date" end
+    if s == 3 is return "Ext" end
+    return "Name"
+end
+
+pub fn new_panel(dir: string, title: string) -> Panel is
+    return Panel { dir: dir, branch: "", list: flist::make(title), selected: [], vfs: vfs::local(), sort: 0 }
+end
+
+pub fn initial() -> Model is
+    let wd: string = fs_cwd()
+    let mut ti: tinput::TI = tinput::make("> ", "cmd: cd, cp, mv, rm, mkdir, touch, sftp, podman, hedit…")
+    tinput::do_focus(&mut ti)
+    ti.width = 80
+    let fi: tinput::TI = tinput::make("> ", "Fuzzy search…")
+    return Model {
+        panels: [new_panel(wd, "● Left"), new_panel(wd, "○ Right")],
+        active: 0, cmd: ti, status: "", mode: MODE_EXPLORER, ed: editor::make(), editor_file: "",
+        progress: 0.0, quitting: false, fuzzy: fi, fuzzy_results: [], bulk_from: "", bulk_to: "",
+        confirm_msg: "", confirm_action: "", podman: [], sub_shell: false, w: 0, h: 0,
+        blink_epoch: time_now_ms(), want_suspend: false, want_shell: false
+    }
+end
+
+pub fn sel_has(p: Panel, path: string) -> bool is
+    return vfs::contains(p.selected, path)
+end
+
+pub fn sel_count(p: Panel) -> int is
+    return p.selected.len()
+end
+
+pub fn sel_toggle(p: &mut Panel, path: string) is
+    if vfs::contains(p.selected, path) is
+        let mut n: [string] = []
+        for s in p.selected is
+            if s != path is n.push(s) end
+        end
+        p.selected = n
+    else is
+        p.selected.push(path)
+    end
+end
+
+pub fn sel_clear(p: &mut Panel) is
+    p.selected = []
+end
