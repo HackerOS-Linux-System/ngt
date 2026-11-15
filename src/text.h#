@@ -1,0 +1,390 @@
+pub fn byte_at(s: string, i: int) -> int is
+    return __builtin_str_to_char_code(s[i..i + 1])
+end
+
+;; Decode one UTF-8 scalar at byte offset i -> (codepoint, byte length).
+pub fn decode_at(s: string, i: int) -> (int, int) is
+    let n: int = s.len()
+    let b0: int = byte_at(s, i)
+    if b0 < 128 is return (b0, 1) end
+    if b0 >= 240 && i + 3 < n is
+        let cp: int = (b0 - 240) * 262144 + (byte_at(s, i + 1) - 128) * 4096 + (byte_at(s, i + 2) - 128) * 64 + (byte_at(s, i + 3) - 128)
+        return (cp, 4)
+    end
+    if b0 >= 224 && b0 < 240 && i + 2 < n is
+        let cp: int = (b0 - 224) * 4096 + (byte_at(s, i + 1) - 128) * 64 + (byte_at(s, i + 2) - 128)
+        return (cp, 3)
+    end
+    if b0 >= 192 && b0 < 224 && i + 1 < n is
+        let cp: int = (b0 - 192) * 64 + (byte_at(s, i + 1) - 128)
+        return (cp, 2)
+    end
+    return (b0, 1)
+end
+
+;; Display width of one scalar (0 / 1 / 2 columns).
+pub fn rune_w(cp: int) -> int is
+    if cp < 32 is return 0 end
+    if cp >= 127 && cp < 160 is return 0 end
+    if cp >= 768 && cp <= 879 is return 0 end
+    if cp >= 8203 && cp <= 8207 is return 0 end
+    if cp >= 65024 && cp <= 65039 is return 0 end
+    if cp >= 4352 && cp <= 4447 is return 2 end
+    if cp >= 11904 && cp <= 12350 is return 2 end
+    if cp >= 12353 && cp <= 13311 is return 2 end
+    if cp >= 13312 && cp <= 19903 is return 2 end
+    if cp >= 19968 && cp <= 40959 is return 2 end
+    if cp >= 40960 && cp <= 42191 is return 2 end
+    if cp >= 44032 && cp <= 55203 is return 2 end
+    if cp >= 63744 && cp <= 64255 is return 2 end
+    if cp >= 65072 && cp <= 65131 is return 2 end
+    if cp >= 65281 && cp <= 65376 is return 2 end
+    if cp >= 65504 && cp <= 65510 is return 2 end
+    if cp >= 126976 && cp <= 127231 is return 2 end
+    if cp >= 127744 && cp <= 128591 is return 2 end
+    if cp >= 128640 && cp <= 128767 is return 2 end
+    if cp >= 129280 && cp <= 129535 is return 2 end
+    if cp >= 131072 && cp <= 262141 is return 2 end
+    return 1
+end
+
+;; End of an ANSI escape starting at ESC (byte offset i) -> offset after it.
+pub fn ansi_end(s: string, i: int) -> int is
+    let n: int = s.len()
+    let mut j: int = i + 1
+    while j < n is
+        let c: int = byte_at(s, j)
+        j += 1
+        if (c >= 64 && c <= 90) || (c >= 97 && c <= 122) is return j end
+    end
+    return j
+end
+
+;; Printable width of a string (ANSI escapes are free).
+pub fn width(s: string) -> int is
+    let n: int = s.len()
+    let mut i: int = 0
+    let mut w: int = 0
+    while i < n is
+        let b: int = byte_at(s, i)
+        if b == 27 is
+            i = ansi_end(s, i)
+        elsif b < 128 is
+            if b >= 32 && b != 127 is w += 1 end
+            i += 1
+        else is
+            let (cp, sz) = decode_at(s, i)
+            w += rune_w(cp)
+            i += sz
+        end
+    end
+    return w
+end
+
+pub fn strip(s: string) -> string is
+    let n: int = s.len()
+    let mut i: int = 0
+    let mut out: string = ""
+    while i < n is
+        let b: int = byte_at(s, i)
+        if b == 27 is
+            i = ansi_end(s, i)
+        else is
+            let (cp, sz) = decode_at(s, i)
+            out = out + s[i..i + sz]
+            i += sz
+        end
+    end
+    return out
+end
+
+;; Number of Unicode scalars.
+pub fn rune_count(s: string) -> int is
+    let n: int = s.len()
+    let mut i: int = 0
+    let mut c: int = 0
+    while i < n is
+        let (cp, sz) = decode_at(s, i)
+        i += sz
+        c += 1
+    end
+    return c
+end
+
+;; The scalars of a string, one string per scalar.
+pub fn runes(s: string) -> [string] is
+    let n: int = s.len()
+    let mut i: int = 0
+    let mut out: [string] = []
+    while i < n is
+        let (cp, sz) = decode_at(s, i)
+        out.push(s[i..i + sz])
+        i += sz
+    end
+    return out
+end
+
+pub fn rep(s: string, n: int) -> string is
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < n is
+        out = out + s
+        i += 1
+    end
+    return out
+end
+
+pub fn spaces(n: int) -> string is
+    if n <= 0 is return "" end
+    return rep(" ", n)
+end
+
+pub fn maxi(a: int, b: int) -> int is
+    if a > b is return a end
+    return b
+end
+
+pub fn mini(a: int, b: int) -> int is
+    if a < b is return a end
+    return b
+end
+
+;; reflow truncate.StringWithTail (ANSI aware). Note: like reflow, the tail's
+;; width is reserved up front, so a string exactly `w` wide is cut as well.
+pub fn trunc_tail(s: string, w: int, tail: string) -> string is
+    let tw: int = width(tail)
+    if w < tw is return tail end
+    let limit: int = w - tw
+    let n: int = s.len()
+    let mut i: int = 0
+    let mut cur: int = 0
+    let mut out: string = ""
+    let mut last_seq: string = ""
+    while i < n is
+        let b: int = byte_at(s, i)
+        if b == 27 is
+            let e: int = ansi_end(s, i)
+            last_seq = s[i..e]
+            out = out + s[i..e]
+            i = e
+        else is
+            let (cp, sz) = decode_at(s, i)
+            cur += rune_w(cp)
+            if cur > limit is
+                out = out + tail
+                if last_seq != "" && last_seq != "\x1b[0m" is out = out + "\x1b[0m" end
+                return out
+            end
+            out = out + s[i..i + sz]
+            i += sz
+        end
+    end
+    return out
+end
+
+;; Cut to at most w columns, no tail.
+pub fn cut(s: string, w: int) -> string is
+    let n: int = s.len()
+    let mut i: int = 0
+    let mut cur: int = 0
+    let mut out: string = ""
+    let mut open_seq: bool = false
+    while i < n is
+        let b: int = byte_at(s, i)
+        if b == 27 is
+            let e: int = ansi_end(s, i)
+            out = out + s[i..e]
+            open_seq = s[i..e] != "\x1b[0m"
+            i = e
+        else is
+            let (cp, sz) = decode_at(s, i)
+            let rw: int = rune_w(cp)
+            if cur + rw > w is
+                if open_seq is out = out + "\x1b[0m" end
+                return out
+            end
+            cur += rw
+            out = out + s[i..i + sz]
+            i += sz
+        end
+    end
+    return out
+end
+
+pub fn pad_right(s: string, w: int) -> string is
+    return s + spaces(w - width(s))
+end
+
+pub fn pad_left(s: string, w: int) -> string is
+    return spaces(w - width(s)) + s
+end
+
+;; Widest line of a multi-line block.
+pub fn block_w(s: string) -> int is
+    let ls: [string] = str_split(s, "\n")
+    let mut m: int = 0
+    for l in ls is
+        let w: int = width(l)
+        if w > m is m = w end
+    end
+    return m
+end
+
+pub fn block_h(s: string) -> int is
+    return str_split(s, "\n").len()
+end
+
+fn is_space_cp(cp: int) -> bool is
+    return cp == 32 || cp == 9 || cp == 11 || cp == 12 || cp == 13 || cp == 133 || cp == 160
+end
+
+;; reflow wordwrap.String(s, limit)
+pub fn wordwrap(s: string, limit: int) -> string is
+    if limit <= 0 is return s end
+    let n: int = s.len()
+    let mut buf: string = ""
+    let mut space: string = ""
+    let mut word: string = ""
+    let mut word_w: int = 0
+    let mut line_len: int = 0
+    let mut i: int = 0
+    while i < n is
+        let b: int = byte_at(s, i)
+        if b == 27 is
+            let e: int = ansi_end(s, i)
+            word = word + s[i..e]
+            i = e
+        else is
+            let (cp, sz) = decode_at(s, i)
+            let ch: string = s[i..i + sz]
+            i += sz
+            if cp == 10 is
+                if word == "" is
+                    if line_len + space.len() > limit is
+                        line_len = 0
+                    else is
+                        buf = buf + space
+                    end
+                    space = ""
+                end
+                ;; addWord
+                if word != "" is
+                    line_len += space.len()
+                    buf = buf + space
+                    space = ""
+                    line_len += word_w
+                    buf = buf + word
+                    word = ""
+                    word_w = 0
+                end
+                buf = buf + "\n"
+                line_len = 0
+                space = ""
+            elsif is_space_cp(cp) is
+                if word != "" is
+                    line_len += space.len()
+                    buf = buf + space
+                    space = ""
+                    line_len += word_w
+                    buf = buf + word
+                    word = ""
+                    word_w = 0
+                end
+                space = space + ch
+            elsif cp == 45 is
+                line_len += space.len()
+                buf = buf + space
+                space = ""
+                if word != "" is
+                    line_len += word_w
+                    buf = buf + word
+                    word = ""
+                    word_w = 0
+                end
+                buf = buf + ch
+            else is
+                word = word + ch
+                word_w += rune_w(cp)
+                if line_len + space.len() + word_w > limit && word_w < limit is
+                    buf = buf + "\n"
+                    line_len = 0
+                    space = ""
+                end
+            end
+        end
+    end
+    if word != "" is
+        line_len += space.len()
+        buf = buf + space
+        buf = buf + word
+    end
+    return buf
+end
+
+;; reflow wrap.String(s, limit): hard-wrap lines that are still too long.
+pub fn hardwrap(s: string, limit: int) -> string is
+    if limit <= 0 is return s end
+    let n: int = s.len()
+    let mut out: string = ""
+    let mut line_len: int = 0
+    let mut forceful: bool = false
+    let mut i: int = 0
+    while i < n is
+        let b: int = byte_at(s, i)
+        if b == 27 is
+            let e: int = ansi_end(s, i)
+            out = out + s[i..e]
+            i = e
+        else is
+            let (cp, sz) = decode_at(s, i)
+            let ch: string = s[i..i + sz]
+            i += sz
+            if cp == 10 is
+                out = out + "\n"
+                line_len = 0
+                forceful = false
+            else is
+                let rw: int = rune_w(cp)
+                if line_len + rw > limit is
+                    out = out + "\n"
+                    line_len = 0
+                    forceful = true
+                end
+                let mut skip: bool = false
+                if line_len == 0 is
+                    if forceful && is_space_cp(cp) is
+                        skip = true
+                    else is
+                        forceful = false
+                    end
+                end
+                if !skip is
+                    line_len += rw
+                    out = out + ch
+                end
+            end
+        end
+    end
+    return out
+end
+
+;; Go's "%.1f" for non-negative values (round half up is close enough).
+pub fn fmt1(f: f64) -> string is
+    let t: int = floor(f * 10.0 + 0.5)
+    return to_string(t / 10) + "." + to_string(t % 10)
+end
+
+;; humanSize from the Go version: "512 B", "2.9 KB", "1.5 MB", ...
+pub fn human_size(s: int) -> string is
+    if s < 1024 is return to_string(s) + " B" end
+    let mut div: int = 1024
+    let mut exp: int = 0
+    let mut nn: int = s / 1024
+    while nn >= 1024 is
+        div = div * 1024
+        exp += 1
+        nn = nn / 1024
+    end
+    let units: string = "KMGTPE"
+    return fmt1((s as f64) / (div as f64)) + " " + units[exp..exp + 1] + "B"
+end
