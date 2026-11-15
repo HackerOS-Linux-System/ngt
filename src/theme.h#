@@ -1,0 +1,129 @@
+mod lg
+
+pub const APP_NAME: string = "ngt"
+pub const VERSION: string = "v0.3"
+pub const MAX_EDIT_SIZE: int = 10485760
+pub const PREVIEW_LINES: int = 40
+pub const SELECTED_MARKER: string = "▶"
+
+pub const BG: string = "#0D1117"
+pub const SURFACE: string = "#161B22"
+pub const SURFACE2: string = "#21262D"
+pub const BORDER: string = "#30363D"
+pub const BORDER_HI: string = "#58A6FF"
+pub const ACCENT: string = "#58A6FF"
+pub const GREEN: string = "#3FB950"
+pub const RED: string = "#F85149"
+pub const YELLOW: string = "#D29922"
+pub const MUTED: string = "#8B949E"
+pub const TEXT: string = "#C9D1D9"
+pub const SUCCESS: string = "#3FB950"
+pub const DIM: string = "#484F58"
+
+pub fn title_bar() -> lg::Sty is
+    return lg::pad(lg::bold(lg::fg(lg::bg(lg::base(), SURFACE), ACCENT)), 0, 2, 0, 2)
+end
+
+pub fn app_name() -> lg::Sty is
+    return lg::bold(lg::fg(lg::base(), ACCENT))
+end
+
+pub fn version_style() -> lg::Sty is
+    return lg::fg(lg::base(), MUTED)
+end
+
+pub fn panel_title() -> lg::Sty is
+    return lg::bold(lg::fg(lg::base(), ACCENT))
+end
+
+pub fn active_panel() -> lg::Sty is
+    return lg::pad(lg::boxed(lg::base(), "rounded", BORDER_HI), 0, 1, 0, 1)
+end
+
+pub fn inactive_panel() -> lg::Sty is
+    return lg::pad(lg::boxed(lg::base(), "rounded", BORDER), 0, 1, 0, 1)
+end
+
+pub fn path_style() -> lg::Sty is
+    return lg::pad(lg::bg(lg::fg(lg::base(), TEXT), SURFACE), 0, 1, 0, 1)
+end
+
+pub fn branch_style() -> lg::Sty is
+    return lg::bold(lg::fg(lg::base(), GREEN))
+end
+
+pub fn vfs_tag() -> lg::Sty is
+    return lg::pad(lg::bold(lg::bg(lg::fg(lg::base(), BG), ACCENT)), 0, 1, 0, 1)
+end
+
+pub fn sort_tag() -> lg::Sty is
+    return lg::pad(lg::bg(lg::fg(lg::base(), BG), YELLOW), 0, 1, 0, 1)
+end
+
+pub fn dir_style() -> lg::Sty is
+    return lg::bold(lg::fg(lg::base(), ACCENT))
+end
+
+pub fn file_style() -> lg::Sty is
+    return lg::fg(lg::base(), TEXT)
+end
+
+pub fn status_bar() -> lg::Sty is
+    return lg::pad(lg::bg(lg::base(), SURFACE), 0, 1, 0, 1)
+end
+
+pub fn error_style() -> lg::Sty is
+    return lg::bold(lg::fg(lg::base(), RED))
+end
+
+pub fn success_style() -> lg::Sty is
+    return lg::bold(lg::fg(lg::base(), GREEN))
+end
+
+pub fn warn_style() -> lg::Sty is
+    return lg::bold(lg::fg(lg::base(), YELLOW))
+end
+
+pub fn input_label() -> lg::Sty is
+    return lg::pad(lg::fg(lg::base(), MUTED), 0, 1, 0, 1)
+end
+
+pub fn input_box() -> lg::Sty is
+    return lg::pad(lg::bg(lg::boxed(lg::base(), "normal", BORDER_HI), SURFACE), 0, 1, 0, 1)
+end
+
+pub fn editor_box() -> lg::Sty is
+    return lg::pad(lg::bg(lg::boxed(lg::base(), "rounded", BORDER_HI), SURFACE), 1, 1, 1, 1)
+end
+
+pub fn dialog() -> lg::Sty is
+    return lg::align(lg::pad(lg::bg(lg::boxed(lg::base(), "rounded", RED), SURFACE), 1, 3, 1, 3), "center")
+end
+
+pub fn fbar() -> lg::Sty is
+    return lg::bg(lg::fg(lg::base(), MUTED), SURFACE2)
+end
+
+pub fn fbar_key() -> lg::Sty is
+    return lg::pad(lg::bold(lg::bg(lg::fg(lg::base(), TEXT), DIM)), 0, 1, 0, 1)
+end
+
+pub fn fbar_desc() -> lg::Sty is
+    return lg::pad(lg::bg(lg::fg(lg::base(), MUTED), SURFACE2), 0, 1, 0, 1)
+end
+
+pub fn git_modified() -> lg::Sty is
+    return lg::fg(lg::base(), YELLOW)
+end
+
+pub fn git_added() -> lg::Sty is
+    return lg::fg(lg::base(), GREEN)
+end
+
+pub fn git_deleted() -> lg::Sty is
+    return lg::fg(lg::base(), RED)
+end
+
+pub fn podman_style() -> lg::Sty is
+    return lg::pad(lg::bold(lg::bg(lg::fg(lg::base(), BG), "#892BE2")), 0, 1, 0, 1)
+end
