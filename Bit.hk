@@ -1,1 +1,19 @@
+[package]
+-> name        => ngt
+-> version     => 0.5.0
+-> description => ngt — HackerOS dual-panel TUI file manager (cd, mkdir, touch, cp, mv, rm, hedit, sftp, podman, fuzzy search, bulk rename).
+-> authors     => ["HackerOS Team <hackeros068@gmail.com>"]
+-> license     => MIT
+-> lang        => h#
 
+[edition]
+-> edition => 2026
+
+[layout]
+-> src => src
+
+[build]
+-> link => static
+
+[dependencies]
+-> tui => newest
