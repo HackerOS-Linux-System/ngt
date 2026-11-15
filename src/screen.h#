@@ -1,0 +1,56 @@
+use "bit -> tui" from "tui"
+
+mod text
+mod model
+mod view
+
+pub fn fit(frame: string, w: int, h: int) -> string is
+    let mut lines: [string] = str_split(frame, "\n")
+    if h > 0 && lines.len() > h is
+        let mut cut: [string] = []
+        let mut i: int = lines.len() - h
+        while i < lines.len() is
+            cut.push(lines[i])
+            i += 1
+        end
+        lines = cut
+    end
+    let mut out: [string] = []
+    for l in lines is
+        if w > 0 && text::width(l) > w is
+            out.push(text::cut(l, w))
+        else is
+            out.push(l)
+        end
+    end
+    return __builtin_str_join(out, "\x1b[K\r\n") + "\x1b[K"
+end
+
+pub fn present(m: model::Model) is
+    let mut h: int = m.h
+    let mut w: int = m.w
+    if h <= 0 is h = 24 end
+    if w <= 0 is w = 80 end
+    let frame: string = fit(view::render(m), w, h)
+    __builtin_io_write_no_nl("\x1b[H" + frame + "\x1b[J")
+    __builtin_io_flush()
+end
+
+pub fn enter() -> string is
+    let saved: string = tui::enable_raw_mode()
+    tui::enter_alt_screen()
+    tui::hide_cursor()
+    tui::enable_mouse()
+    __builtin_io_write_no_nl("\x1b[?2004h")
+    __builtin_io_flush()
+    return saved
+end
+
+pub fn leave(saved: string) is
+    __builtin_io_write_no_nl("\x1b[?2004l")
+    tui::disable_mouse()
+    tui::show_cursor()
+    tui::exit_alt_screen()
+    __builtin_io_flush()
+    tui::disable_raw_mode(saved)
+end
