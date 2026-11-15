@@ -46,8 +46,8 @@ fn main() is
     panel::refresh(&mut m, 0)
     panel::refresh(&mut m, 1)
     let (w0, h0) = tui::term_size_fast()
-    m.w = w0
-    m.h = h0
+    m.w = if w0 > 0 is w0 else is 80 end
+    m.h = if h0 > 0 is h0 else is 24 end
     update::apply_layout(&mut m)
     let mut saved: string = screen::enter()
     screen::present(m)
@@ -64,7 +64,7 @@ fn main() is
             if now - last_size_check > 300 is
                 last_size_check = now
                 let (w, h) = tui::term_size_fast()
-                if w != m.w || h != m.h is
+                if w > 0 && h > 0 && (w != m.w || h != m.h) is
                     m.w = w
                     m.h = h
                     update::apply_layout(&mut m)
