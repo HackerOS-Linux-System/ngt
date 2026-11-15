@@ -1,0 +1,264 @@
+mod text
+mod lg
+mod flist
+mod vfs
+mod tinput
+mod editor
+mod theme
+mod model
+mod panel
+mod ops
+
+pub fn apply_layout(m: &mut model::Model) is
+    let w: int = m.w
+    let h: int = m.h
+    if w == 0 || h == 0 is return end
+    let mut content_h: int = h - 3 - 3
+    if content_h < 5 is content_h = 5 end
+    let half_w: int = (w / 2) - 4
+    flist::set_size(&mut m.panels[0].list, half_w, content_h - 2)
+    flist::set_size(&mut m.panels[1].list, half_w, content_h - 2)
+    editor::set_size(&mut m.ed, w - 4, content_h)
+    m.cmd.width = w - 6
+    m.fuzzy.width = w - 4
+end
+
+fn explorer_mode_keys(m: &mut model::Model, key: string) -> bool is
+    if key == "ctrl+c" || key == "q" is
+        m.quitting = true
+        return true
+    end
+    if key == "r" is
+        panel::refresh(m, m.active)
+        return true
+    end
+    if key == "tab" is
+        m.active = 1 - m.active
+        m.panels[0].list.title = "○ Left"
+        m.panels[1].list.title = "○ Right"
+        if m.active == 0 is
+            m.panels[0].list.title = "● Left"
+        else is
+            m.panels[1].list.title = "● Right"
+        end
+        return true
+    end
+    if key == "backspace" || key == "h" || key == "left" is
+        ops::execute_command(m, "cd ..")
+        return true
+    end
+    if key == "space" is
+        if !m.cmd.focus is
+            let (ok, it) = flist::selected(m.panels[m.active].list)
+            if ok is
+                let fp: string = vfs::join(m.panels[m.active].dir, it.title)
+                model::sel_toggle(&mut m.panels[m.active], fp)
+                panel::sync_selection(m, m.active)
+            end
+            return true
+        end
+    end
+    if key == "enter" || key == "l" || key == "right" is
+        if m.cmd.focus is
+            let cmd_str: string = tinput::val(m.cmd)
+            tinput::reset(&mut m.cmd)
+            ops::execute_command(m, cmd_str)
+            return true
+        end
+        let (ok, it) = flist::selected(m.panels[m.active].list)
+        if ok is
+            if it.is_dir is
+                ops::execute_command(m, "cd " + it.title)
+            elsif ops::is_archive(it.title) is
+                ops::mount_archive(m, it.title)
+            else is
+                ops::execute_command(m, "hedit " + it.title)
+            end
+        end
+        return true
+    end
+    if key == "f5" is
+        ops::copy_to_other(m)
+        return true
+    end
+    if key == "f6" is
+        ops::move_to_other(m)
+        return true
+    end
+    if key == "f8" is
+        ops::prompt_confirm_delete(m)
+        return true
+    end
+    if key == "ctrl+p" is
+        m.mode = model::MODE_FUZZY
+        tinput::reset(&mut m.fuzzy)
+        tinput::do_focus(&mut m.fuzzy)
+        panel::fuzzy_search(m)
+        return true
+    end
+    if key == "ctrl+r" is
+        m.mode = model::MODE_BULK
+        tinput::reset(&mut m.cmd)
+        m.cmd.placeholder = "Regex pattern to replace"
+        tinput::do_focus(&mut m.cmd)
+        return true
+    end
+    if key == "ctrl+z" is
+        m.want_suspend = true
+        return true
+    end
+    if key == "ctrl+o" is
+        m.want_shell = true
+        return true
+    end
+    if key == "ctrl+s" is
+        if !m.cmd.focus is
+            ops::cycle_sort(m)
+            return true
+        end
+    end
+    if key == "ctrl+d" is
+        ops::list_podman(m)
+        return true
+    end
+    if key == "ctrl+u" is
+        if !m.cmd.focus is
+            ops::duplicate_selected(m)
+            return true
+        end
+    end
+    if key == "down" || key == "j" is
+        flist::cursor_down(&mut m.panels[m.active].list)
+        return true
+    end
+    if key == "up" || key == "k" is
+        flist::cursor_up(&mut m.panels[m.active].list)
+        return true
+    end
+    if key == "f1" is
+        ops::help(m)
+        return true
+    end
+    return false
+end
+
+;; One key press (already decoded by tui). Sets m.quitting when the app should exit.
+pub fn on_key(m: &mut model::Model, key: string) is
+    m.blink_epoch = time_now_ms()
+    let mode: int = m.mode
+    if mode == model::MODE_PROGRESS is return end
+
+    if mode == model::MODE_CONFIRM is
+        if key == "y" || key == "Y" is
+            if m.confirm_action == "delete" is ops::delete_with_progress(m) end
+            m.mode = model::MODE_EXPLORER
+        elsif key == "n" || key == "N" || key == "esc" is
+            m.mode = model::MODE_EXPLORER
+            m.status = lg::render(theme::warn_style(), "Cancelled")
+        end
+        return
+    end
+
+    if mode == model::MODE_PODMAN is
+        if key == "esc" is
+            m.mode = model::MODE_EXPLORER
+        elsif key == "enter" is
+            if m.podman.len() > 0 is
+                let f: [string] = __builtin_str_split_whitespace(m.podman[0])
+                if f.len() > 0 is ops::connect_podman(m, f[0]) end
+            end
+            m.mode = model::MODE_EXPLORER
+        end
+        return
+    end
+
+    if mode == model::MODE_EDITOR is
+        if key == "ctrl+s" is
+            let w: int = fs_write(m.editor_file, editor::value(m.ed))
+            if w == 0 is
+                m.status = lg::render(theme::error_style(), "Save error: open " + m.editor_file + ": permission denied")
+            else is
+                m.status = lg::render(theme::success_style(), "Saved: " + m.editor_file)
+            end
+            m.mode = model::MODE_EXPLORER
+            tinput::do_focus(&mut m.cmd)
+            return
+        end
+        if key == "esc" is
+            m.mode = model::MODE_EXPLORER
+            tinput::do_focus(&mut m.cmd)
+            return
+        end
+        editor::update(&mut m.ed, key)
+        return
+    end
+
+    if mode == model::MODE_FUZZY is
+        if key == "enter" is
+            let idx: int = flist::index(m.panels[m.active].list)
+            if m.fuzzy_results.len() > idx is
+                let selected: string = m.fuzzy_results[idx]
+                ops::execute_command(m, "cd " + selected)
+            end
+            m.mode = model::MODE_EXPLORER
+            return
+        end
+        if key == "esc" is
+            m.mode = model::MODE_EXPLORER
+            panel::refresh(m, m.active)
+            return
+        end
+        tinput::update(&mut m.fuzzy, key)
+        panel::fuzzy_search(m)
+        return
+    end
+
+    if mode == model::MODE_BULK is
+        if m.bulk_from == "" is
+            if key == "enter" is
+                m.bulk_from = tinput::val(m.cmd)
+                tinput::reset(&mut m.cmd)
+                m.cmd.placeholder = "Replacement string (use $1 for groups)"
+                return
+            end
+        else is
+            if key == "enter" is
+                m.bulk_to = tinput::val(m.cmd)
+                panel::bulk_rename(m)
+                m.mode = model::MODE_EXPLORER
+                return
+            end
+        end
+        if key == "esc" is
+            m.mode = model::MODE_EXPLORER
+            m.bulk_from = ""
+            return
+        end
+        tinput::update(&mut m.cmd, key)
+        return
+    end
+
+    ;; explorer
+    if explorer_mode_keys(m, key) is return end
+    let quit: bool = flist::update(&mut m.panels[m.active].list, key)
+    if quit is m.quitting = true end
+    tinput::update(&mut m.cmd, key)
+end
+
+;; Bracketed paste.
+pub fn on_paste(m: &mut model::Model, s: string) is
+    m.blink_epoch = time_now_ms()
+    if m.mode == model::MODE_EDITOR is
+        editor::insert_text(&mut m.ed, s)
+    elsif m.mode == model::MODE_FUZZY is
+        tinput::insert_text(&mut m.fuzzy, s)
+        panel::fuzzy_search(m)
+    elsif m.mode == model::MODE_BULK is
+        tinput::insert_text(&mut m.cmd, s)
+    elsif m.mode == model::MODE_EXPLORER is
+        if m.panels[m.active].list.fstate == 1 is
+            tinput::insert_text(&mut m.panels[m.active].list.filter, s)
+        end
+        tinput::insert_text(&mut m.cmd, s)
+    end
+end
