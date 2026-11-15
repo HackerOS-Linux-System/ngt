@@ -1,0 +1,116 @@
+use "bit -> tui" from "tui"
+
+mod text
+mod lg
+mod fuzzy
+mod tinput
+mod vfs
+mod flist
+mod theme
+mod editor
+mod model
+mod panel
+mod view
+mod screen
+mod ops
+mod update
+
+extern static [c] is
+    fn kill(pid: int, sig: int) -> int
+    fn system(cmd: string) -> int
+end
+
+fn update_blink(m: &mut model::Model) -> bool is
+    let phase: int = ((time_now_ms() - m.blink_epoch) / 530) % 2
+    let hidden: bool = phase == 1
+    let mut changed: bool = false
+    if m.cmd.blink_hidden != hidden is changed = true end
+    m.cmd.blink_hidden = hidden
+    m.fuzzy.blink_hidden = hidden
+    m.ed.blink_hidden = hidden
+    m.panels[0].list.filter.blink_hidden = hidden
+    m.panels[1].list.filter.blink_hidden = hidden
+    return changed
+end
+
+fn run_shell(m: &mut model::Model, saved: string) is
+    screen::leave(saved)
+    let sh: string = env_get("SHELL")
+    let prog: string = if sh == "" is "sh" else is sh end
+    ;; system(3) lets the shell inherit the terminal (run_cmd_exec would capture its output)
+    let _rc: int = system("cd " + vfs::sq(m.panels[m.active].dir) + " 2>/dev/null; exec " + prog)
+end
+
+fn main() is
+    let mut m: model::Model = model::initial()
+    panel::refresh(&mut m, 0)
+    panel::refresh(&mut m, 1)
+    let (w0, h0) = tui::term_size_fast()
+    m.w = w0
+    m.h = h0
+    update::apply_layout(&mut m)
+    let mut saved: string = screen::enter()
+    screen::present(m)
+    let mut inp: any = tui::input_new()
+    let mut last_size_check: int = time_now_ms()
+    let mut pasting: bool = false
+    let mut paste_buf: string = ""
+    while !m.quitting is
+        let key: string = tui::input_poll(&mut inp)
+        let mut dirty: bool = false
+        if key == "" is
+            if update_blink(&mut m) is dirty = true end
+            let now: int = time_now_ms()
+            if now - last_size_check > 300 is
+                last_size_check = now
+                let (w, h) = tui::term_size_fast()
+                if w != m.w || h != m.h is
+                    m.w = w
+                    m.h = h
+                    update::apply_layout(&mut m)
+                    dirty = true
+                end
+            end
+        elsif key == "paste_start" is
+            pasting = true
+            paste_buf = ""
+        elsif key == "paste_end" is
+            pasting = false
+            update::on_paste(&mut m, paste_buf)
+            dirty = true
+        elsif pasting is
+            if key == "space" is
+                paste_buf = paste_buf + " "
+            elsif key == "enter" is
+                paste_buf = paste_buf + "\n"
+            elsif key == "tab" is
+                paste_buf = paste_buf + "\t"
+            elsif text::rune_count(key) == 1 is
+                paste_buf = paste_buf + key
+            end
+        elsif string_starts_with(key, "mouse:") is
+            ;; reserved for future mouse handling
+        else is
+            update::on_key(&mut m, key)
+            update_blink(&mut m)
+            dirty = true
+        end
+        if m.want_shell is
+            m.want_shell = false
+            run_shell(&mut m, saved)
+            saved = screen::enter()
+            panel::refresh(&mut m, 0)
+            panel::refresh(&mut m, 1)
+            dirty = true
+        end
+        if m.want_suspend is
+            m.want_suspend = false
+            screen::leave(saved)
+            let _k: int = kill(os_pid(), 19)
+            saved = screen::enter()
+            dirty = true
+        end
+        if dirty && !m.quitting is screen::present(m) end
+    end
+    screen::leave(saved)
+end
