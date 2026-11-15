@@ -1,0 +1,560 @@
+mod text
+
+pub struct Entry is
+    pub name: string
+    pub is_dir: bool
+    pub size: int
+    pub mtime: int      ;; nanoseconds since epoch (sort key)
+    pub stamp: string   ;; "2006-01-02 15:04"
+end
+
+pub struct Vfs is
+    pub kind: string        ;; local | sftp | podman | tar | zip
+    pub cwd: string
+    pub host: string        ;; sftp: host:port
+    pub user: string
+    pub pass: string
+    pub cid: string         ;; podman container id (12 chars)
+    pub cname: string       ;; podman container name
+    pub file: string        ;; tar / zip archive path
+    pub names: [string]     ;; archive member names
+end
+
+pub fn sq(s: string) -> string is
+    return "'" + string_replace(s, "'", "'\\''") + "'"
+end
+
+;; Run a shell command: (exit code, stdout, stderr)
+;; run_cmd_last_stdout() hands out a buffer that the next command overwrites,
+;; so both streams are copied right away.
+fn own(s: string) -> string is
+    let c: string = s + "x"
+    return c[0..c.len() - 1]
+end
+
+pub fn sh(cmd: string) -> (int, string, string) is
+    let rc: int = run_cmd_exec(cmd, 3600)
+    let out: string = own(run_cmd_last_stdout())
+    let err: string = own(run_cmd_last_stderr())
+    return (rc, out, err)
+end
+
+fn first_line(s: string) -> string is
+    let t: string = string_trim(s)
+    let parts: [string] = str_split(t, "\n")
+    return parts[0]
+end
+
+pub fn local() -> Vfs is
+    return Vfs { kind: "local", cwd: "", host: "", user: "", pass: "", cid: "", cname: "", file: "", names: [] }
+end
+
+pub fn name(v: Vfs) -> string is
+    if v.kind == "local" is return "local" end
+    if v.kind == "sftp" is return "sftp://" + v.host end
+    if v.kind == "podman" is return "podman://" + v.cname end
+    if v.kind == "tar" is return "tar://" + base(v.file) end
+    return "zip://" + base(v.file)
+end
+
+pub fn base(p: string) -> string is
+    let mut path: string = p
+    while path.len() > 1 && path[path.len() - 1..path.len()] == "/" is path = path[0..path.len() - 1] end
+    let parts: [string] = str_split(path, "/")
+    let last: string = parts[parts.len() - 1]
+    if last == "" is return "/" end
+    return last
+end
+
+pub fn dirname(p: string) -> string is
+    return path_parent(p)
+end
+
+;; filepath.Join + Clean
+pub fn join(a: string, b: string) -> string is
+    if a == "" is return clean(b) end
+    return clean(a + "/" + b)
+end
+
+pub fn clean(p: string) -> string is
+    if p == "" is return "." end
+    let abs: bool = p[0..1] == "/"
+    let parts: [string] = str_split(p, "/")
+    let mut st: [string] = []
+    for x in parts is
+        if x == "" || x == "." is
+            ;; skip
+        elsif x == ".." is
+            if st.len() > 0 && st[st.len() - 1] != ".." is
+                let mut ns: [string] = []
+                let mut i: int = 0
+                while i < st.len() - 1 is
+                    ns.push(st[i])
+                    i += 1
+                end
+                st = ns
+            elsif !abs is
+                st.push("..")
+            end
+        else is
+            st.push(x)
+        end
+    end
+    let joined: string = __builtin_str_join(st, "/")
+    if abs is return "/" + joined end
+    if joined == "" is return "." end
+    return joined
+end
+
+pub fn is_abs(p: string) -> bool is
+    return p.len() > 0 && p[0..1] == "/"
+end
+
+pub fn ext(p: string) -> string is
+    let b: string = base(p)
+    let mut i: int = b.len() - 1
+    while i >= 0 is
+        if b[i..i + 1] == "." is return b[i..b.len()] end
+        i -= 1
+    end
+    return ""
+end
+
+pub fn now_stamp() -> string is
+    let (rc, out, err) = sh("date '+%Y-%m-%d %H:%M'")
+    return string_trim(out)
+end
+
+;; ── find(1) based listing (local and sftp) ─────────────────────────────────
+
+fn find_cmd(dir: string) -> string is
+    return "find " + sq(dir) + " -mindepth 1 -maxdepth 1 -printf '%y\\t%s\\t%T@\\t%TY-%Tm-%Td %TH:%TM\\t%f\\n'"
+end
+
+fn parse_find(out: string) -> [Entry] is
+    let mut res: [Entry] = []
+    for line in str_split(out, "\n") is
+        if line != "" is
+            let f: [string] = str_split(line, "\t")
+            if f.len() >= 5 is
+                let tparts: [string] = str_split(f[2], ".")
+                let mut ns: int = to_int(tparts[0]) * 1000000000
+                if tparts.len() > 1 is
+                    let mut fr: string = tparts[1] + "000000000"
+                    ns += to_int(fr[0..9])
+                end
+                res.push(Entry { name: f[4], is_dir: f[0] == "d", size: to_int(f[1]), mtime: ns, stamp: f[3] })
+            end
+        end
+    end
+    return sort_by_name(res)
+end
+
+fn to_int(s: string) -> int is
+    return __builtin_conv_str_to_int(s)
+end
+
+;; os.ReadDir returns entries ordered by filename (bytewise).
+fn sort_by_name(es: [Entry]) -> [Entry] is
+    let mut a: [Entry] = es
+    let mut i: int = 1
+    while i < a.len() is
+        let cur: Entry = a[i]
+        let mut j: int = i - 1
+        while j >= 0 && a[j].name > cur.name is
+            a[j + 1] = a[j]
+            j -= 1
+        end
+        a[j + 1] = cur
+        i += 1
+    end
+    return a
+end
+
+;; ── ssh plumbing (password auth, host keys ignored — as the Go version) ────
+
+fn ssh_port(host: string) -> string is
+    let p: [string] = str_split(host, ":")
+    if p.len() > 1 is return p[p.len() - 1] end
+    return "22"
+end
+
+fn ssh_host(host: string) -> string is
+    let p: [string] = str_split(host, ":")
+    return p[0]
+end
+
+fn askpass_path() -> string is
+    return env_temp_dir() + "/ngt-askpass-" + to_string(os_pid())
+end
+
+fn ssh_env(v: Vfs) -> string is
+    return "NGT_PW=" + sq(v.pass) + " SSH_ASKPASS=" + sq(askpass_path()) + " SSH_ASKPASS_REQUIRE=force DISPLAY=ngt:0 "
+end
+
+fn ssh_opts(v: Vfs) -> string is
+    return "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10 -o PreferredAuthentications=password,keyboard-interactive,publickey -o NumberOfPasswordPrompts=1 -o ControlMaster=auto -o ControlPath=/tmp/ngt-ssh-%C -o ControlPersist=300 "
+end
+
+fn ssh_run(v: Vfs, cmd: string) -> (int, string, string) is
+    let c: string = ssh_env(v) + "ssh " + ssh_opts(v) + "-p " + ssh_port(v.host) + " " + sq(v.user + "@" + ssh_host(v.host)) + " " + sq(cmd) + " </dev/null"
+    return sh(c)
+end
+
+fn write_askpass() is
+    let _w: int = fs_write(askpass_path(), "#!/bin/sh\nprintf '%s\\n' \"$NGT_PW\"\n")
+    let _c: int = run_cmd_exec("chmod 700 " + sq(askpass_path()), 10)
+end
+
+pub fn connect_sftp(host: string, user: string, pass: string) -> (Vfs, string) is
+    let mut v: Vfs = Vfs { kind: "sftp", cwd: "/", host: host, user: user, pass: pass, cid: "", cname: "", file: "", names: [] }
+    write_askpass()
+    let (rc, out, err) = ssh_run(v, "pwd")
+    if rc != 0 is
+        let e: string = string_trim(err)
+        if e == "" is return (v, "ssh: handshake failed") end
+        return (v, "ssh: " + e)
+    end
+    v.cwd = first_line(out)
+    return (v, "")
+end
+
+;; ── podman ─────────────────────────────────────────────────────────────────
+
+pub fn connect_podman(id: string) -> (Vfs, string) is
+    let mut v: Vfs = Vfs { kind: "podman", cwd: "/", host: "", user: "", pass: "", cid: "", cname: "", file: "", names: [] }
+    let (rc0, out0, err0) = sh("command -v podman")
+    if rc0 != 0 is return (v, "podman not found in PATH: exec: \"podman\": executable file not found in $PATH") end
+    let (rc, out, err) = sh("podman inspect --format '{{.Id}} {{.Name}}' " + sq(id))
+    if rc != 0 is return (v, "container not found: exit status " + to_string(rc)) end
+    let f: [string] = str_split(first_line(out), " ")
+    if f.len() < 2 || f[0].len() < 12 is return (v, "failed to parse container info") end
+    v.cid = f[0][0..12]
+    let mut nm: string = f[1]
+    if nm.len() > 0 && nm[0..1] == "/" is nm = nm[1..nm.len()] end
+    v.cname = nm
+    return (v, "")
+end
+
+pub fn list_podman() -> ([string], string) is
+    let (rc, out, err) = sh("podman ps --format '{{.ID}} {{.Names}} {{.Status}}'")
+    if rc != 0 is return ([], "exit status " + to_string(rc)) end
+    let mut res: [string] = []
+    for l in str_split(string_trim(out), "\n") is
+        if l != "" is res.push(l) end
+    end
+    return (res, "")
+end
+
+fn podman_ls(v: Vfs, dir: string) -> ([Entry], string) is
+    let (rc, out, err) = sh("podman exec " + v.cid + " ls -la --time-style=long-iso " + sq(dir) + " 2>/dev/null")
+    if rc != 0 is return ([], "ls failed in container: exit status " + to_string(rc)) end
+    let stamp: string = now_stamp()
+    let mut res: [Entry] = []
+    for line in str_split(string_trim(out), "\n") is
+        if line != "" && !string_starts_with(line, "total") is
+            let f: [string] = __builtin_str_split_whitespace(line)
+            if f.len() >= 8 is
+                let nm: string = __builtin_str_join(slice_from(f, 7), " ")
+                if nm != "." && nm != ".." is
+                    res.push(Entry { name: nm, is_dir: f[0][0..1] == "d", size: to_int(f[4]), mtime: 0, stamp: stamp })
+                end
+            end
+        end
+    end
+    return (res, "")
+end
+
+fn slice_from(a: [string], from: int) -> [string] is
+    let mut o: [string] = []
+    let mut i: int = from
+    while i < a.len() is
+        o.push(a[i])
+        i += 1
+    end
+    return o
+end
+
+;; ── archives ───────────────────────────────────────────────────────────────
+
+pub fn open_archive(path: string) -> (Vfs, string) is
+    let mut v: Vfs = Vfs { kind: "zip", cwd: path, host: "", user: "", pass: "", cid: "", cname: "", file: path, names: [] }
+    if ext(path) == ".zip" is
+        let (rc, out, err) = sh("unzip -Z1 " + sq(path) + " 2>&1")
+        if rc != 0 is return (v, "zip: not a valid zip file") end
+        for l in str_split(out, "\n") is
+            if l != "" is v.names.push(l) end
+        end
+        return (v, "")
+    end
+    v.kind = "tar"
+    let (rc2, out2, err2) = sh("tar -tf " + sq(path) + " 2>&1")
+    if rc2 != 0 is return (v, "archive/tar: invalid tar header") end
+    for l in str_split(out2, "\n") is
+        if l != "" is v.names.push(l) end
+    end
+    return (v, "")
+end
+
+fn archive_rel(v: Vfs, dir: string) -> string is
+    if dir == v.file is return "" end
+    let pre: string = v.file + "/"
+    if string_starts_with(dir, pre) is return dir[pre.len()..dir.len()] end
+    return ""
+end
+
+fn archive_ls(v: Vfs, dir: string) -> [Entry] is
+    let rel: string = archive_rel(v, dir)
+    let prefix: string = if rel == "" is "" else is rel + "/" end
+    let stamp: string = now_stamp()
+    let mut seen: [string] = []
+    let mut res: [Entry] = []
+    for nm in v.names is
+        let name0: string = if string_starts_with(nm, "./") is nm[2..nm.len()] else is nm end
+        if name0 != "" && string_starts_with(name0, prefix) && name0 != prefix is
+            let suffix: string = name0[prefix.len()..name0.len()]
+            let idx: int = __builtin_str_index_of(suffix, "/")
+            if idx >= 0 is
+                let dn: string = suffix[0..idx]
+                if dn != "" && !contains(seen, dn) is
+                    seen.push(dn)
+                    res.push(Entry { name: dn, is_dir: true, size: 0, mtime: 0, stamp: stamp })
+                end
+            else is
+                res.push(Entry { name: suffix, is_dir: false, size: 0, mtime: 0, stamp: stamp })
+            end
+        end
+    end
+    return res
+end
+
+pub fn contains(a: [string], x: string) -> bool is
+    for y in a is
+        if y == x is return true end
+    end
+    return false
+end
+
+;; ── the interface ──────────────────────────────────────────────────────────
+
+pub fn read_dir(v: Vfs, dir: string) -> ([Entry], string) is
+    if v.kind == "local" is
+        if !fs_exists(dir) is return ([], "open " + dir + ": no such file or directory") end
+        if !fs_is_dir(dir) is return ([], "readdirent " + dir + ": not a directory") end
+        let (rc, out, err) = sh(find_cmd(dir) + " 2>/dev/null")
+        if rc != 0 && out == "" is return ([], "open " + dir + ": permission denied") end
+        return (parse_find(out), "")
+    end
+    if v.kind == "sftp" is
+        let (rc, out, err) = ssh_run(v, find_cmd(dir))
+        if rc != 0 && out == "" is return ([], "sftp: " + string_trim(err)) end
+        return (parse_find(out), "")
+    end
+    if v.kind == "podman" is return podman_ls(v, dir) end
+    return (archive_ls(v, dir), "")
+end
+
+;; (exists, is_dir, size)
+pub fn stat(v: Vfs, p: string) -> (bool, bool, int) is
+    if v.kind == "local" is
+        if !fs_exists(p) is return (false, false, 0) end
+        return (true, fs_is_dir(p), fs_size(p))
+    end
+    if v.kind == "sftp" is
+        let (rc, out, err) = ssh_run(v, "stat -L -c '%F|%s' " + sq(p))
+        if rc != 0 is return (false, false, 0) end
+        let f: [string] = str_split(first_line(out), "|")
+        return (true, string_contains(f[0], "directory"), to_int(f[1]))
+    end
+    if v.kind == "podman" is
+        let (rc, out, err) = sh("podman exec " + v.cid + " stat -c '%F|%s' " + sq(p) + " 2>/dev/null")
+        if rc != 0 is return (false, false, 0) end
+        let f: [string] = str_split(first_line(out), "|")
+        return (true, string_contains(f[0], "directory"), to_int(f[1]))
+    end
+    let rel: string = archive_rel(v, p)
+    for nm in v.names is
+        if nm == rel || nm == rel + "/" is return (true, nm == rel + "/", 0) end
+    end
+    return (false, false, 0)
+end
+
+;; Change directory. Returns "" or an error message.
+pub fn chdir(v: &mut Vfs, dir: string) -> string is
+    if v.kind == "local" is
+        if !fs_exists(dir) is return "chdir " + dir + ": no such file or directory" end
+        if !fs_is_dir(dir) is return "chdir " + dir + ": not a directory" end
+        let rc: int = fs_chdir(dir)
+        if rc == 0 is return "chdir " + dir + ": permission denied" end
+        v.cwd = fs_cwd()
+        return ""
+    end
+    if v.kind == "sftp" is
+        let (ex, isd, sz) = stat(v, dir)
+        if !ex is return "file does not exist" end
+        v.cwd = dir
+        return ""
+    end
+    if v.kind == "podman" is
+        let (rc, out, err) = sh("podman exec " + v.cid + " test -d " + sq(dir))
+        if rc != 0 is return "directory does not exist in container: " + dir end
+        v.cwd = dir
+        return ""
+    end
+    v.cwd = dir
+    return ""
+end
+
+pub fn remove(v: Vfs, p: string) -> string is
+    if v.kind == "local" is
+        let (rc, out, err) = sh("rm -rf -- " + sq(p))
+        if rc != 0 is return "unlinkat " + p + ": permission denied" end
+        return ""
+    end
+    if v.kind == "sftp" is
+        let (rc, out, err) = ssh_run(v, "rm -rf -- " + sq(p))
+        if rc != 0 is return string_trim(err) end
+        return ""
+    end
+    if v.kind == "podman" is
+        let (rc, out, err) = sh("podman exec " + v.cid + " rm -rf " + sq(p))
+        if rc != 0 is return "exit status " + to_string(rc) end
+        return ""
+    end
+    if v.kind == "tar" is return "TAR is read-only" end
+    return "ZIP is read-only"
+end
+
+pub fn rename(v: Vfs, src: string, dst: string) -> string is
+    if v.kind == "local" is
+        let (rc, out, err) = sh("mv -T -- " + sq(src) + " " + sq(dst) + " 2>&1")
+        if rc != 0 is return "rename " + src + " " + dst + ": " + lowerfirst(string_trim(out)) end
+        return ""
+    end
+    if v.kind == "sftp" is
+        let (rc, out, err) = ssh_run(v, "mv -- " + sq(src) + " " + sq(dst))
+        if rc != 0 is return string_trim(err) end
+        return ""
+    end
+    if v.kind == "podman" is
+        let (rc, out, err) = sh("podman exec " + v.cid + " mv " + sq(src) + " " + sq(dst))
+        if rc != 0 is return "exit status " + to_string(rc) end
+        return ""
+    end
+    if v.kind == "tar" is return "TAR is read-only" end
+    return "ZIP is read-only"
+end
+
+;; Map coreutils messages to the errno strings Go's os package prints.
+fn lowerfirst(s: string) -> string is
+    let l: string = string_lower(s)
+    if string_contains(l, "subdirectory of itself") is return "invalid argument" end
+    if string_contains(l, "cannot overwrite directory") is return "is a directory" end
+    if string_contains(l, "cannot overwrite non-directory") is return "not a directory" end
+    if string_contains(l, "directory not empty") is return "directory not empty" end
+    if string_contains(l, "no such file") is return "no such file or directory" end
+    if string_contains(l, "permission denied") is return "permission denied" end
+    if string_contains(l, "not a directory") is return "not a directory" end
+    if string_contains(l, "is a directory") is return "is a directory" end
+    if string_contains(l, "file exists") is return "file exists" end
+    if string_contains(l, "read-only file system") is return "read-only file system" end
+    let i: int = __builtin_str_index_of(s, ": ")
+    if i >= 0 is return string_lower(s[i + 2..s.len()]) end
+    return s
+end
+
+pub fn mkdir_all(v: Vfs, p: string) -> string is
+    if v.kind == "local" is
+        let (rc, out, err) = sh("mkdir -p -- " + sq(p) + " 2>&1")
+        if rc != 0 is return "mkdir " + p + ": " + lowerfirst(string_trim(out)) end
+        return ""
+    end
+    if v.kind == "sftp" is
+        let (rc, out, err) = ssh_run(v, "mkdir -p -- " + sq(p))
+        if rc != 0 is return string_trim(err) end
+        return ""
+    end
+    if v.kind == "podman" is
+        let (rc, out, err) = sh("podman exec " + v.cid + " mkdir -p " + sq(p))
+        if rc != 0 is return "exit status " + to_string(rc) end
+        return ""
+    end
+    if v.kind == "tar" is return "TAR is read-only" end
+    return "ZIP is read-only"
+end
+
+;; vfs.Create(path) + Close(): an empty (truncated) file.
+pub fn create_empty(v: Vfs, p: string) -> string is
+    if v.kind == "tar" is return "TAR is read-only" end
+    if v.kind == "zip" is return "ZIP is read-only" end
+    return put_text(v, p, "")
+end
+
+;; Bring a file of the VFS to a local path.
+pub fn fetch(v: Vfs, p: string, local_path: string) -> string is
+    if v.kind == "local" is
+        let (rc, out, err) = sh("cp -- " + sq(p) + " " + sq(local_path) + " 2>&1")
+        if rc != 0 is return "open " + p + ": " + lowerfirst(string_trim(out)) end
+        return ""
+    end
+    if v.kind == "sftp" is
+        let c: string = ssh_env(v) + "ssh " + ssh_opts(v) + "-p " + ssh_port(v.host) + " " + sq(v.user + "@" + ssh_host(v.host)) + " " + sq("cat -- " + sq(p)) + " > " + sq(local_path) + " 2>/tmp/ngt-ssh-err-" + to_string(os_pid()) + " </dev/null"
+        let (rc, out, err) = sh(c)
+        if rc != 0 is return "sftp: " + string_trim(fs_read("/tmp/ngt-ssh-err-" + to_string(os_pid()))) end
+        return ""
+    end
+    if v.kind == "podman" is
+        let (rc, out, err) = sh("podman cp " + v.cid + ":" + sq(p) + " " + sq(local_path) + " 2>&1")
+        if rc != 0 is return "cannot read file from container: exit status " + to_string(rc) end
+        return ""
+    end
+    let rel: string = archive_rel(v, p)
+    let cmd: string = if v.kind == "zip" is "unzip -p " + sq(v.file) + " " + sq(rel) + " > " + sq(local_path) else is "tar -xOf " + sq(v.file) + " " + sq(rel) + " > " + sq(local_path) end
+    let (rc2, out2, err2) = sh(cmd + " 2>/dev/null")
+    if rc2 != 0 is return "file does not exist" end
+    return ""
+end
+
+;; Store a local file at a path of the VFS.
+pub fn put(v: Vfs, local_path: string, p: string) -> string is
+    if v.kind == "local" is
+        let (rc, out, err) = sh("cp -- " + sq(local_path) + " " + sq(p) + " 2>&1")
+        if rc != 0 is return "open " + p + ": " + lowerfirst(string_trim(out)) end
+        return ""
+    end
+    if v.kind == "sftp" is
+        let c: string = ssh_env(v) + "ssh " + ssh_opts(v) + "-p " + ssh_port(v.host) + " " + sq(v.user + "@" + ssh_host(v.host)) + " " + sq("cat > " + sq(p)) + " < " + sq(local_path) + " 2>/tmp/ngt-ssh-err-" + to_string(os_pid())
+        let (rc, out, err) = sh(c)
+        if rc != 0 is return "sftp: " + string_trim(fs_read("/tmp/ngt-ssh-err-" + to_string(os_pid()))) end
+        return ""
+    end
+    if v.kind == "podman" is
+        let (rc, out, err) = sh("podman cp " + sq(local_path) + " " + v.cid + ":" + sq(p) + " 2>&1")
+        if rc != 0 is return "exit status " + to_string(rc) end
+        return ""
+    end
+    if v.kind == "tar" is return "TAR is read-only" end
+    return "ZIP is read-only"
+end
+
+pub fn put_text(v: Vfs, p: string, content: string) -> string is
+    let tmp: string = env_temp_dir() + "/ngt-put-" + to_string(os_pid()) + "-" + to_string(time_now_ms())
+    let _w: int = fs_write(tmp, content)
+    let e: string = put(v, tmp, p)
+    let _r: int = fs_remove(tmp)
+    return e
+end
+
+;; Whole file as text (for previews / the editor).
+pub fn read_text(v: Vfs, p: string) -> (string, string) is
+    if v.kind == "local" is
+        if !fs_exists(p) is return ("", "open " + p + ": no such file or directory") end
+        return (fs_read(p), "")
+    end
+    let tmp: string = env_temp_dir() + "/ngt-get-" + to_string(os_pid()) + "-" + to_string(time_now_ms())
+    let e: string = fetch(v, p, tmp)
+    if e != "" is return ("", e) end
+    let c: string = fs_read(tmp)
+    let _r: int = fs_remove(tmp)
+    return (c, "")
+end
