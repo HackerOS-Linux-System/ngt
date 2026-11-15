@@ -1,0 +1,234 @@
+mod text
+mod lg
+mod flist
+mod vfs
+mod tinput
+mod theme
+mod model
+
+;; ── sorting ────────────────────────────────────────────────────────────────
+
+fn less(a: vfs::Entry, b: vfs::Entry, mode: int) -> bool is
+    if a.is_dir != b.is_dir is return a.is_dir end
+    if mode == 1 is return a.size < b.size end
+    if mode == 2 is return a.mtime > b.mtime end
+    if mode == 3 is return vfs::ext(a.name) < vfs::ext(b.name) end
+    return string_lower(a.name) < string_lower(b.name)
+end
+
+fn msort(a: [vfs::Entry], mode: int) -> [vfs::Entry] is
+    let n: int = a.len()
+    if n <= 1 is return a end
+    let mid: int = n / 2
+    let mut l: [vfs::Entry] = []
+    let mut r: [vfs::Entry] = []
+    let mut i: int = 0
+    while i < n is
+        if i < mid is l.push(a[i]) else is r.push(a[i]) end
+        i += 1
+    end
+    let ls: [vfs::Entry] = msort(l, mode)
+    let rs: [vfs::Entry] = msort(r, mode)
+    let mut out: [vfs::Entry] = []
+    let mut x: int = 0
+    let mut y: int = 0
+    while x < ls.len() && y < rs.len() is
+        if less(rs[y], ls[x], mode) is
+            out.push(rs[y])
+            y += 1
+        else is
+            out.push(ls[x])
+            x += 1
+        end
+    end
+    while x < ls.len() is
+        out.push(ls[x])
+        x += 1
+    end
+    while y < rs.len() is
+        out.push(rs[y])
+        y += 1
+    end
+    return out
+end
+
+;; ── git ────────────────────────────────────────────────────────────────────
+
+;; (names, statuses) from `git status --porcelain`
+fn git_status(p: model::Panel) -> ([string], [string]) is
+    let mut keys: [string] = []
+    let mut vals: [string] = []
+    if p.vfs.kind != "local" is return (keys, vals) end
+    let (rc, out, err) = vfs::sh("cd " + vfs::sq(p.dir) + " && git status --porcelain 2>/dev/null")
+    if rc != 0 is return (keys, vals) end
+    for line in str_split(out, "\n") is
+        if line != "" is
+            let f: [string] = __builtin_str_split_whitespace(line)
+            if f.len() >= 2 && line.len() >= 2 is
+                keys.push(f[1])
+                vals.push(line[0..2])
+            end
+        end
+    end
+    return (keys, vals)
+end
+
+fn status_of(keys: [string], vals: [string], name: string) -> string is
+    let mut found: string = ""
+    let mut i: int = 0
+    while i < keys.len() is
+        if keys[i] == name is found = vals[i] end
+        i += 1
+    end
+    return found
+end
+
+fn update_git_branch(p: &mut model::Panel) is
+    if p.vfs.kind != "local" is
+        p.branch = ""
+        return
+    end
+    let (rc, out, err) = vfs::sh("cd " + vfs::sq(p.dir) + " && git rev-parse --abbrev-ref HEAD 2>/dev/null")
+    if rc != 0 is
+        p.branch = ""
+        return
+    end
+    p.branch = string_trim(out)
+end
+
+;; ── refresh ────────────────────────────────────────────────────────────────
+
+pub fn refresh(m: &mut model::Model, idx: int) is
+    let (entries, err) = vfs::read_dir(m.panels[idx].vfs, m.panels[idx].dir)
+    if err != "" is
+        m.status = lg::render(theme::error_style(), "ReadDir: " + err)
+        return
+    end
+    let (gk, gv) = git_status(m.panels[idx])
+    let sorted: [vfs::Entry] = msort(entries, m.panels[idx].sort)
+    let mut items: [flist::Item] = []
+    for e in sorted is
+        let fp: string = vfs::join(m.panels[idx].dir, e.name)
+        items.push(flist::Item {
+            title: e.name, status: status_of(gk, gv, e.name), selected: model::sel_has(m.panels[idx], fp),
+            is_dir: e.is_dir, size: e.size, mtime: e.mtime, stamp: e.stamp
+        })
+    end
+    flist::set_items(&mut m.panels[idx].list, items)
+    update_git_branch(&mut m.panels[idx])
+end
+
+pub fn sync_selection(m: &mut model::Model, idx: int) is
+    let mut items: [flist::Item] = []
+    for it in m.panels[idx].list.items is
+        let mut n: flist::Item = flist::Item { title: it.title, status: it.status, selected: false, is_dir: it.is_dir, size: it.size, mtime: it.mtime, stamp: it.stamp }
+        n.selected = model::sel_has(m.panels[idx], vfs::join(m.panels[idx].dir, it.title))
+        items.push(n)
+    end
+    flist::set_items(&mut m.panels[idx].list, items)
+end
+
+;; ── fuzzy search (filepath.Walk + case-insensitive substring) ──────────────
+
+fn glob_escape(s: string) -> string is
+    let mut o: string = ""
+    for r in text::runes(s) is
+        if r == "*" || r == "?" || r == "[" || r == "]" || r == "\\" is
+            o = o + "\\" + r
+        else is
+            o = o + r
+        end
+    end
+    return o
+end
+
+pub fn fuzzy_search(m: &mut model::Model) is
+    let query: string = tinput::val(m.fuzzy)
+    m.fuzzy_results = []
+    if query == "" is
+        flist::set_items(&mut m.panels[m.active].list, [])
+        return
+    end
+    let dir: string = m.panels[m.active].dir
+    let (rc, out, err) = vfs::sh("cd " + vfs::sq(dir) + " 2>/dev/null && find . -iname " + vfs::sq("*" + glob_escape(query) + "*") + " 2>/dev/null | LC_ALL=C sort")
+    let mut results: [string] = []
+    let mut items: [flist::Item] = []
+    for l in str_split(out, "\n") is
+        if l != "" is
+            let mut rel: string = l
+            if rel.len() > 2 && rel[0..2] == "./" is rel = rel[2..rel.len()] end
+            results.push(rel)
+            items.push(flist::Item { title: rel, status: "", selected: false, is_dir: false, size: 0, mtime: 0, stamp: "0001-01-01 00:00" })
+        end
+    end
+    m.fuzzy_results = results
+    flist::set_items(&mut m.panels[m.active].list, items)
+end
+
+;; ── bulk rename ────────────────────────────────────────────────────────────
+
+fn sed_escape(s: string, delim: string) -> string is
+    return string_replace(s, delim, "\\" + delim)
+end
+
+;; Go replacement syntax ($1, ${1}) -> sed (\1)
+fn go_repl_to_sed(r: string) -> string is
+    let mut o: string = ""
+    let rs: [string] = text::runes(r)
+    let mut i: int = 0
+    while i < rs.len() is
+        if rs[i] == "$" && i + 1 < rs.len() is
+            let nx: string = rs[i + 1]
+            if nx >= "0" && nx <= "9" is
+                o = o + "\\" + nx
+                i += 2
+            elsif nx == "{" is
+                let mut j: int = i + 2
+                let mut num: string = ""
+                while j < rs.len() && rs[j] != "}" is
+                    num = num + rs[j]
+                    j += 1
+                end
+                o = o + "\\" + num
+                i = j + 1
+            else is
+                o = o + "$"
+                i += 1
+            end
+        else is
+            o = o + rs[i]
+            i += 1
+        end
+    end
+    return o
+end
+
+pub fn bulk_rename(m: &mut model::Model) is
+    let delim: string = "\x01"
+    let pat: string = sed_escape(m.bulk_from, delim)
+    let repl: string = sed_escape(go_repl_to_sed(m.bulk_to), delim)
+    let prog: string = "s" + delim + pat + delim + repl + delim + "g"
+    let (rc0, out0, err0) = vfs::sh("printf '' | sed -E " + vfs::sq(prog) + " 2>&1")
+    if rc0 != 0 is
+        m.status = lg::render(theme::error_style(), "Invalid regex: " + string_trim(out0))
+        return
+    end
+    let mut renamed: int = 0
+    let sel: [string] = m.panels[m.active].selected
+    for file in sel is
+        let base: string = vfs::base(file)
+        let (rc, out, err) = vfs::sh("printf '%s' " + vfs::sq(base) + " | sed -E " + vfs::sq(prog) + " 2>&1")
+        let new_path: string = vfs::join(vfs::dirname(file), out)
+        let e: string = vfs::rename(vfs::local(), file, new_path)
+        if e != "" is
+            m.status = m.status + lg::render(theme::error_style(), " " + base + ": " + e)
+        else is
+            renamed += 1
+        end
+    end
+    m.panels[m.active].selected = []
+    refresh(m, m.active)
+    m.bulk_from = ""
+    m.bulk_to = ""
+    m.status = lg::render(theme::success_style(), "Renamed " + to_string(renamed) + " file(s)")
+end
